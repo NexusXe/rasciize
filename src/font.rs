@@ -35,9 +35,23 @@ pub fn get_coverage_array(
 }
 
 pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
+    // horrific hack to try and filter out weird glyphs that aren't really characters and might not show up as monospaced
+    let standard_glyph_width_wide = font
+        .outline_glyph(font.glyph_id('M').with_scale(PxScale::from(font_size)))?
+        .px_bounds()
+        .width();
+    let standard_glyph_width_narrow = font
+        .outline_glyph(font.glyph_id('i').with_scale(PxScale::from(font_size)))?
+        .px_bounds()
+        .width();
     let outlined_glyph: OutlinedGlyph =
         font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
     let bounds = outlined_glyph.px_bounds();
+    if ((bounds.width() - standard_glyph_width_wide).abs() > font_size.sqrt())
+        && ((bounds.height() - standard_glyph_width_narrow).abs() > font_size.sqrt())
+    {
+        return None;
+    }
     let mut sum: u32 = 0;
     outlined_glyph.draw(|_, _, coverage| {
         let scaled_coverage = unsafe { fmul_fast(coverage, 255.0) } as u8;

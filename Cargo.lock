@@ -741,6 +741,7 @@ dependencies = [
  "ab_glyph",
  "image",
  "ordered-float",
+ "rand",
 ]
 
 [[package]]
