@@ -1,0 +1,80 @@
+use ab_glyph::{Font, FontRef, GlyphId, OutlinedGlyph, PxScale};
+use ordered_float::OrderedFloat;
+use std::{
+    collections::BTreeMap,
+    intrinsics::{fdiv_fast, fmul_fast, fsub_fast},
+};
+
+pub type FloatPrecision = f64;
+
+pub fn get_coverage_array(
+    font: &FontRef,
+    font_size: u16,
+    glyph_id: GlyphId,
+) -> Option<Vec<Vec<f32>>> {
+    // initially get a coverage array at 4x scale and only keep every fourth row to get a 4x wide character for printing in a terminal
+    let font_size = f32::from(font_size * 4);
+    match font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size))) {
+        Some(outlined_glyph) => {
+            let bounds = outlined_glyph.px_bounds();
+            let mut coverage_array: Vec<Vec<f32>> =
+                vec![vec![0.0; bounds.width() as usize]; bounds.height() as usize];
+            outlined_glyph.draw(|x, y, coverage| {
+                coverage_array[y as usize][x as usize] = coverage;
+            });
+            // Now keep only every fourth row to get 4x wide characters
+            let coverage_array: Vec<Vec<f32>> = coverage_array
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, row)| if i % 4 == 0 { Some(row) } else { None })
+                .collect();
+            Some(coverage_array)
+        }
+        None => None,
+    }
+}
+
+pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
+    let outlined_glyph: OutlinedGlyph =
+        font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
+    let bounds = outlined_glyph.px_bounds();
+    let mut sum: u32 = 0;
+    outlined_glyph.draw(|_, _, coverage| {
+        let scaled_coverage = unsafe { fmul_fast(coverage, 255.0) } as u8;
+        sum += u32::from(scaled_coverage);
+    });
+
+    Some(unsafe {
+        fdiv_fast(
+            FloatPrecision::from(sum),
+            FloatPrecision::from(fmul_fast(fmul_fast(bounds.width(), bounds.height()), 255.0)),
+        )
+    })
+}
+
+pub fn find_nearest_optimized<V>(
+    map: &BTreeMap<OrderedFloat<FloatPrecision>, V>,
+    target: FloatPrecision,
+) -> Option<(&OrderedFloat<FloatPrecision>, &V)> {
+    let key = OrderedFloat(target);
+
+    // Find cursor at the first key >= target
+    let cursor: std::collections::btree_map::Cursor<'_, OrderedFloat<FloatPrecision>, V> =
+        map.lower_bound(std::ops::Bound::Included(&key));
+
+    let ceil = cursor.peek_next(); // The element exactly at or after target
+    let floor = cursor.peek_prev(); // The element before that
+
+    match (floor, ceil) {
+        (Some(f), Some(c)) => {
+            if unsafe { fsub_fast(key.0, f.0.0).abs() < fsub_fast(c.0.0, key.0).abs() } {
+                Some(f)
+            } else {
+                Some(c)
+            }
+        }
+        (Some(f), None) => Some(f),
+        (None, Some(c)) => Some(c),
+        (None, None) => None,
+    }
+}

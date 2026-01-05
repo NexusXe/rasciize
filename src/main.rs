@@ -3,144 +3,111 @@
 #![feature(extend_one)]
 #![feature(core_intrinsics)]
 #![allow(internal_features)]
+#![warn(clippy::pedantic)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::wildcard_imports)]
 
-use ab_glyph::{Font, FontRef, GlyphId, OutlinedGlyph, PxScale};
+use ab_glyph::{Font, FontRef};
 use ordered_float::OrderedFloat;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io::Write};
 
-const FONT_TTF: &[u8] = include_bytes!("./fonts/NotoSansMono-Regular.ttf");
-type FloatPrecision = f64;
+const FONT_TTF: &[u8] = include_bytes!("./fonts/CascadiaMono-Regular.ttf");
 
-fn get_coverage_array(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Vec<Vec<f32>> {
-    match font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size))) {
-        Some(outlined_glyph) => {
-            let bounds = outlined_glyph.px_bounds();
-            let width = bounds.width() as usize;
-            let height = bounds.height() as usize;
-            let mut coverage_array: Vec<Vec<f32>> = vec![vec![0.0; width]; height];
-            outlined_glyph.draw(|x, y, coverage| {
-                coverage_array[y as usize][x as usize] = coverage;
-            });
-            coverage_array
-        }
-        None => {
-            vec![vec![0.0; 1]; 1]
-        }
-    }
-}
-
-fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
-    use std::intrinsics::{fdiv_fast, fmul_fast};
-    let outlined_glyph: OutlinedGlyph =
-        font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
-    let bounds = outlined_glyph.px_bounds();
-    let mut sum: u32 = 0;
-    outlined_glyph.draw(|_, _, coverage| {
-        let scaled_coverage = unsafe { fmul_fast(coverage, 255.0) } as u8;
-        sum += scaled_coverage as u32;
-    });
-    Some(unsafe {
-        fdiv_fast(
-            sum as FloatPrecision,
-            (bounds.width() * bounds.height() * 255.0) as FloatPrecision,
-        )
-    })
-}
-
-pub fn find_nearest_optimized<V>(
-    map: &BTreeMap<OrderedFloat<FloatPrecision>, V>,
-    target: FloatPrecision,
-) -> Option<(&OrderedFloat<FloatPrecision>, &V)> {
-    let key = OrderedFloat(target);
-
-    // Find cursor at the first key >= target
-    let cursor: std::collections::btree_map::Cursor<'_, OrderedFloat<FloatPrecision>, V> =
-        map.lower_bound(std::ops::Bound::Included(&key));
-
-    let ceil = cursor.peek_next(); // The element exactly at or after target
-    let floor = cursor.peek_prev(); // The element before that
-
-    match (floor, ceil) {
-        (Some(f), Some(c)) => {
-            if (key.0 - f.0.0).abs() < (c.0.0 - key.0).abs() {
-                Some(f)
-            } else {
-                Some(c)
-            }
-        }
-        (Some(f), None) => Some(f),
-        (None, Some(c)) => Some(c),
-        (None, None) => None,
-    }
-}
+mod font;
+use font::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    const LUT_FONT_SIZE: u16 = 1024; // Size in pixels
+    const RASTER_SIZE: u16 = 32; // Size in pixels
     let font = FontRef::try_from_slice(FONT_TTF)?;
-    //dbg!(font.glyph_count());
-    const FONT_SIZE: usize = 32; // Size in pixels
 
-    let mut intensity_lookup: BTreeMap<OrderedFloat<FloatPrecision>, char> = BTreeMap::new();
+    let mut intensity_lookup = BTreeMap::new();
     // manually insert space character with intensity 0.0
     intensity_lookup.insert(OrderedFloat(0.0), ' ');
     // manually insert full block character with intensity 1.0
-    //intensity_lookup.insert(OrderedFloat(1.0), '█');
+    intensity_lookup.insert(OrderedFloat(1.0), '█');
 
-    //let mut collisions: u16 = 0;
     for (id, character) in font.codepoint_ids() {
-        //println!("{id:?} -> {character}");
-        if let Some(mut intensity) = get_intensity(&font, FONT_SIZE as f32, id) {
+        if let Some(mut intensity) = get_intensity(&font, f32::from(LUT_FONT_SIZE), id) {
             while intensity_lookup
                 .try_insert(OrderedFloat(intensity), character)
                 .is_err()
             {
-                //break;
-                // In case of collision, slightly adjust intensity
                 intensity = intensity.next_up();
-                //collisions += 1;
             }
         }
     }
 
-    //println!("Total collisions resolved: {}", collisions);
-    //dbg!(&intensity_lookup);
-    const INPUT: &str = "h-d";
-    let mut output: Vec<Vec<char>> = Vec::new();
-    for c in INPUT.chars() {
-        let coverage_array = get_coverage_array(&font, FONT_SIZE as f32, font.glyph_id(c));
-        let mut char_rows: Vec<Vec<char>> = vec![Vec::new(); coverage_array.len()];
-        for (y, row) in coverage_array.iter().enumerate() {
-            for &coverage in row {
-                if let Some((_, &ch)) =
-                    find_nearest_optimized(&intensity_lookup, coverage as FloatPrecision)
-                {
-                    char_rows[y].push(ch);
-                } else {
-                    char_rows[y].push(' ');
+    let mut input = String::new();
+    print!("Enter text to render >> ");
+    std::io::stdout().flush()?;
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim_end(); // remove trailing newline
+    println!();
+
+    let mut output: Vec<Vec<Vec<char>>> = Vec::new();
+    for c in input.chars() {
+        let Some(coverage_array) = get_coverage_array(&font, RASTER_SIZE, font.glyph_id(c)) else {
+            continue;
+        };
+
+        let mut char_array: Vec<Vec<char>> = Vec::new();
+        for row in coverage_array {
+            let mut char_row: Vec<char> = Vec::new();
+            for coverage in row {
+                let ch = find_nearest_optimized(&intensity_lookup, FloatPrecision::from(coverage))
+                    .unwrap()
+                    .1;
+                char_row.push(*ch);
+            }
+            char_array.push(char_row);
+        }
+        // pad each row to have the same width for this character
+        let max_width = char_array.iter().map(std::vec::Vec::len).max().unwrap_or(0);
+        for row in &mut char_array {
+            while row.len() < max_width {
+                row.push(' ');
+            }
+        }
+
+        output.push(char_array);
+    }
+
+    let r = 243;
+    let g = 123;
+    let b = 33;
+    let reset = "\x1b[0m"; // Code to reset terminal formatting
+
+    // The format string constructs the ANSI escape code sequence
+    print!("\x1b[38;2;{r};{g};{b}m");
+
+    // Now print the output row by row. Some characters won't have as many rows as others, so use checked indexing.
+    let max_height = output.iter().map(std::vec::Vec::len).max().unwrap_or(0);
+    for row_idx in 0..max_height {
+        for (char_idx, char_array) in output.iter().enumerate() {
+            if let Some(char_row) = char_array.get(row_idx) {
+                for ch in char_row {
+                    print!("{ch}");
+                }
+            } else {
+                // Print spaces for missing rows
+                for _ in 0..char_array[0].len() {
+                    print!(" ");
                 }
             }
-        }
-        // Append char_rows to output
-        for (y, row) in char_rows.into_iter().enumerate() {
-            if output.len() <= y {
-                output.push(row);
-            } else {
-                output[y].extend(row);
+            // space between characters except for the last one
+            if char_idx < output.len() - 1 {
+                print!(" ");
             }
-        }
-    }
-
-    for row in output {
-        for ch in row {
-            print!("{}", ch.to_string().repeat(4));
         }
         println!();
     }
-    // let example_coverage = get_coverage_array(&font, FONT_SIZE as f32, font.glyph_id('g'));
-    // for row in example_coverage {
-    //     for coverage in row {
-    //         print!("{}", find_nearest_optimized(&intensity_lookup, coverage as FloatPrecision).unwrap().1.to_string().repeat(4))
-    //     }
-    //     println!();
-    // }
+
+    print!("{reset}"); // Reset terminal formatting
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
     Ok(())
 }
