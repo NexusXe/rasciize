@@ -5,8 +5,10 @@ use std::{
     intrinsics::{fdiv_fast, fmul_fast, fsub_fast},
 };
 
-pub type FloatPrecision = f64;
+pub type FloatPrecision = f32;
+pub type IntensityMap<V> = BTreeMap<OrderedFloat<FloatPrecision>, V>;
 
+#[inline]
 pub fn get_coverage_array(
     font: &FontRef,
     font_size: u16,
@@ -34,6 +36,7 @@ pub fn get_coverage_array(
     }
 }
 
+#[inline]
 pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
     // horrific hack to try and filter out weird glyphs that aren't really characters and might not show up as monospaced
     let standard_glyph_width_wide = font
@@ -47,9 +50,10 @@ pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Optio
     let outlined_glyph: OutlinedGlyph =
         font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
     let bounds = outlined_glyph.px_bounds();
-    if ((bounds.width() - standard_glyph_width_wide).abs() > font_size.sqrt())
-        && ((bounds.height() - standard_glyph_width_narrow).abs() > font_size.sqrt())
-    {
+    if unsafe {
+        fsub_fast(bounds.width(), standard_glyph_width_wide).abs() > font_size.sqrt()
+            && (fsub_fast(bounds.width(), standard_glyph_width_narrow).abs() > font_size.sqrt())
+    } {
         return None;
     }
     let mut sum: u32 = 0;
@@ -58,16 +62,20 @@ pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Optio
         sum += u32::from(scaled_coverage);
     });
 
-    Some(unsafe {
-        fdiv_fast(
-            FloatPrecision::from(sum),
-            FloatPrecision::from(fmul_fast(fmul_fast(bounds.width(), bounds.height()), 255.0)),
-        )
-    })
+    Some(
+        #[allow(clippy::cast_lossless, clippy::cast_precision_loss)]
+        unsafe {
+            fdiv_fast(
+                sum as FloatPrecision,
+                FloatPrecision::from(fmul_fast(fmul_fast(bounds.width(), bounds.height()), 255.0)),
+            )
+        },
+    )
 }
 
+#[inline]
 pub fn find_nearest_optimized<V>(
-    map: &BTreeMap<OrderedFloat<FloatPrecision>, V>,
+    map: &IntensityMap<V>,
     target: FloatPrecision,
 ) -> Option<(&OrderedFloat<FloatPrecision>, &V)> {
     let key = OrderedFloat(target);
@@ -91,4 +99,30 @@ pub fn find_nearest_optimized<V>(
         (None, Some(c)) => Some(c),
         (None, None) => None,
     }
+}
+
+#[inline(always)]
+pub fn prepare_font<const LUT_FONT_SIZE: u16>(
+    font_bytes: &'static [u8],
+) -> Result<(FontRef<'static>, IntensityMap<char>), Box<dyn std::error::Error>> {
+    let font = FontRef::try_from_slice(font_bytes)?;
+
+    let mut intensity_lookup: IntensityMap<char> = IntensityMap::new();
+    // manually insert space character with intensity 0.0
+    intensity_lookup.insert(OrderedFloat(0.0), ' ');
+    // manually insert full block character with intensity 1.0
+    intensity_lookup.insert(OrderedFloat(1.0), '█');
+
+    for (id, character) in font.codepoint_ids() {
+        if let Some(mut intensity) = get_intensity(&font, f32::from(LUT_FONT_SIZE), id) {
+            while intensity_lookup
+                .try_insert(OrderedFloat(intensity), character)
+                .is_err()
+            {
+                intensity = intensity.next_up();
+            }
+        }
+    }
+
+    Ok((font, intensity_lookup))
 }

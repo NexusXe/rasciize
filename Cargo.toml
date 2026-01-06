@@ -5,11 +5,14 @@ name = "rasciize"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+progress = []
+
 [dependencies]
 ab_glyph = "0.2"
 image = "0.25.9"
 ordered-float = "5.1.0"
-rand = { version = "0.9.2", features = ["nightly", "simd_support"] }
+rand = { version = "0.9.2", features = ["nightly", "simd_support", "small_rng"], default-features = false }
 
 
 [profile.release]
@@ -19,7 +22,8 @@ debug = false
 debug-assertions = false
 overflow-checks = false
 codegen-units = 1
-rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=znver2"]
+panic = "abort"
+rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=native", "-C", "target-feature=+crt-static", "-Z", "share-generics"]
 lto = "fat"
 
 [profile.release.build-override]
@@ -29,4 +33,23 @@ debug = false
 debug-assertions = false
 overflow-checks = false
 codegen-units = 1
-rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=znver2"]
+rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=native", "-Z", "share-generics"]
+
+[profile.release.package."*"]
+strip = true
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
+
+[profile.dev]
+opt-level = 1
+debug = true
+debug-assertions = true
+overflow-checks = true
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
+
+[profile.dev.package."*"]
+opt-level = 3
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
