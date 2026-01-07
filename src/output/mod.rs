@@ -260,7 +260,6 @@ pub fn image(
         }
 
         output_frames.push(output_buffer);
-        //sleep(Duration::from_millis(20));
     }
     output_frames.shrink_to_fit();
     let end_time = std::time::Instant::now();
@@ -280,7 +279,7 @@ pub fn image(
                 stdout_handle.flush()?;
                 stdout_handle.write_all(output_frame.as_bytes())?;
                 prefetch_read_data::<_, 2>(output_frames[if idx + 1 < output_frames.len() { idx + 1 } else { 0 }].as_ptr());
-                sleep(Duration::from_millis(20));
+                //sleep(Duration::from_millis(75));
             }
         }
     }
