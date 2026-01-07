@@ -6,11 +6,15 @@
 #![feature(iter_next_chunk)]
 #![feature(int_roundings)]
 #![feature(portable_simd)]
-#![allow(internal_features)]
-//#![warn(clippy::pedantic)]
+#![allow(internal_features)] // for core_intrinsics
+#![warn(clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
 #![allow(clippy::wildcard_imports)]
+#![allow(clippy::used_underscore_items)]
+#![allow(clippy::inline_always)]
+#![allow(clippy::used_underscore_binding)]
 
 use ab_glyph::Font;
 use image::{AnimationDecoder, DynamicImage};

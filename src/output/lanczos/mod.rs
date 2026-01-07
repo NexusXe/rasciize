@@ -217,9 +217,10 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     dst_width: u32,
     filters: &FilterBank,
 ) {
-    if filters.len() != dst_width as usize {
-        panic!("Filter bank length must match destination width");
-    }
+    debug_assert!(
+        filters.len() == dst_width as usize,
+        "Filter bank length must match destination width"
+    );
 
     // Determine max filter size for padding
     let max_taps = filters.iter().map(|f| f.values.len()).max().unwrap_or(0);
@@ -235,7 +236,11 @@ unsafe fn lanczos3_horizontal_pass_avx512(
         let block = i / 16;
         let lane = i % 16;
 
-        indices_store[block * 16 + lane] = f.start_index as i32;
+        // might wrap on 32-bit systems, but that's fine
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            indices_store[block * 16 + lane] = f.start_index as i32;
+        }
 
         for (t, &w) in f.values.iter().enumerate() {
             // Linear index for the weight: block * (stride) + tap * 16 + lane
@@ -247,7 +252,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     let height = ((src.len() as u32) / src_width) as usize;
 
     unsafe {
-        let src_limit = _mm512_set1_epi32((src_width.saturating_sub(1)) as i32);
+        let src_limit = _mm512_set1_epi32((src_width.saturating_sub(1)).cast_signed());
 
         for y in 0..height {
             let src_row = src.as_ptr().add(y * src_width as usize);
@@ -263,8 +268,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 };
 
                 // Load base starting indices for this block of 16 pixels
-                let mut v_indices =
-                    _mm512_loadu_si512(indices_store.as_ptr().add(b * 16) as *const _);
+                let mut v_indices = _mm512_loadu_si512(indices_store.as_ptr().add(b * 16).cast());
                 let mut v_acc = _mm512_setzero_ps();
 
                 for t in 0..max_taps {
@@ -276,7 +280,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                     let v_idx_clamped = _mm512_min_epi32(v_indices, src_limit);
 
                     // Gather source pixels: dst[i] uses src[indices[i]]
-                    let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row as *const _, 4);
+                    let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
 
                     // Accumulate: acc += weight * src
                     v_acc = _mm512_fmadd_round_ps(v_w, v_src, v_acc, ROUNDING_MODE);
@@ -286,7 +290,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 }
 
                 // Store results
-                _mm512_mask_storeu_ps(dst_row.add(b * 16) as *mut _, mask, v_acc);
+                _mm512_mask_storeu_ps(dst_row.add(b * 16).cast(), mask, v_acc);
             }
         }
     }
@@ -295,17 +299,17 @@ unsafe fn lanczos3_horizontal_pass_avx512(
 /// Helper to cast &[__m512] -> &[f32]
 #[inline(always)]
 const fn as_f32(v: &[__m512]) -> &[f32] {
-    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const f32, v.len() * 16) }
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<f32>(), v.len() * 16) }
 }
 
 /// Helper to cast &mut [__m512] -> &mut [f32]
 #[inline(always)]
 const fn as_f32_mut(v: &mut [__m512]) -> &mut [f32] {
-    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr() as *mut f32, v.len() * 16) }
+    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<f32>(), v.len() * 16) }
 }
 
 #[inline(always)]
-fn lanczos3_horizontal(src: PlanarBuffer, dst_width: u32, filters: &FilterBank) -> PlanarBuffer {
+fn lanczos3_horizontal(src: &PlanarBuffer, dst_width: u32, filters: &FilterBank) -> PlanarBuffer {
     let src_width = src.width;
     let src_height = src.height;
     // Horizontal pass changes width, keeps height
@@ -391,7 +395,7 @@ unsafe fn lanczos3_vertical_pass_avx512(
 }
 
 #[inline(always)]
-fn lanczos3_vertical(src: PlanarBuffer, dst_height: u32, filters: &FilterBank) -> PlanarBuffer {
+fn lanczos3_vertical(src: &PlanarBuffer, dst_height: u32, filters: &FilterBank) -> PlanarBuffer {
     let mut dst = PlanarBuffer::new(src.width, dst_height);
 
     unsafe {
@@ -429,7 +433,7 @@ pub fn lanczos3_resize(
 ) -> DynamicImage {
     let src = PlanarBuffer::from_rgb8(input);
     let dst = lanczos3_vertical(
-        lanczos3_horizontal(src, dst_width, horizontal_filters),
+        &lanczos3_horizontal(&src, dst_width, horizontal_filters),
         dst_height,
         vertical_filters,
     );
@@ -437,6 +441,7 @@ pub fn lanczos3_resize(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -455,7 +460,9 @@ mod tests {
 
         for input_bytes in test_cases {
             unsafe {
-                let input_vec = _mm512_loadu_si512(input_bytes.as_ptr() as *const __m512i);
+                // clippy false positive, loadu doesn't need alignment
+                #[allow(clippy::cast_ptr_alignment)]
+                let input_vec = _mm512_loadu_si512(input_bytes.as_ptr().cast::<__m512i>());
                 let results = _mm512_cvtepu8_ps(input_vec);
 
                 for i in 0..4 {
@@ -463,7 +470,7 @@ mod tests {
                     _mm512_storeu_ps(output_floats.as_mut_ptr(), results[i]);
 
                     for j in 0..16 {
-                        let expected = input_bytes[i * 16 + j] as f32;
+                        let expected = f32::from(input_bytes[i * 16 + j]);
                         assert_eq!(
                             output_floats[j],
                             expected,
@@ -482,7 +489,7 @@ mod tests {
         assert_eq!(sinc(0.0), 1.0);
         assert!(sinc(1.0).abs() < 1e-6);
         assert!(sinc(2.0).abs() < 1e-6);
-        assert!((sinc(0.5) - 0.63661975).abs() < 1e-6);
+        assert!((sinc(0.5) - 0.636_619_75).abs() < 1e-6);
     }
 
     #[test]
@@ -510,8 +517,7 @@ mod tests {
             let sum: f32 = weight.values.iter().sum();
             assert!(
                 (sum - 1.0).abs() < 1e-5,
-                "Weight sum should be 1.0, got {}",
-                sum
+                "Weight sum should be 1.0, got {sum}"
             );
             assert!(weight.start_index < src_size as usize);
         }
@@ -585,14 +591,7 @@ mod tests {
                     let diff = (computed - sum).abs();
                     assert!(
                         diff < 1e-4,
-                        "Case {}->{}: Mismatch at ({},{}) want {}, got {}, diff {}",
-                        src_w,
-                        dst_w,
-                        x,
-                        y,
-                        sum,
-                        computed,
-                        diff
+                        "Case {src_w}->{dst_w}: Mismatch at ({x},{y}) want {sum}, got {computed}, diff {diff}"
                     );
                 }
             }
@@ -648,16 +647,8 @@ mod tests {
                     let computed = dst[(y_dst * width + x) as usize];
                     let diff = (computed - sum).abs();
                     assert!(
-                        diff < 1e-3,
-                        "Vertical Case {}->{} (w={}): Mismatch at ({},{}) want {}, got {}, diff {}",
-                        src_h,
-                        dst_h,
-                        width,
-                        x,
-                        y_dst,
-                        sum,
-                        computed,
-                        diff
+                        diff < 2e-4,
+                        "Vertical Case {src_h}->{dst_h} (w={width}): Mismatch at ({x},{y_dst}) want {sum}, got {computed}, diff {diff}"
                     );
                 }
             }
@@ -679,14 +670,13 @@ mod tests {
 
         // Fill with pattern
         let src_floats = as_f32_mut(&mut src.red);
-        if src_floats.len() < (width * src_height) as usize {
-            // If allocation is still wrong (it shouldn't be), this protects from panic somewhat or fails strictly
-            panic!(
-                "PlanarBuffer allocation too small: {} < {}",
-                src_floats.len(),
-                width * src_height
-            );
-        }
+        // If allocation is still wrong (it shouldn't be), this protects from panic somewhat or fails strictly
+        assert!(
+            src_floats.len() >= (width * src_height) as usize,
+            "PlanarBuffer allocation too small: {} < {}",
+            src_floats.len(),
+            width * src_height
+        );
 
         for i in 0..(width * src_height) as usize {
             if i < src_floats.len() {
@@ -696,7 +686,7 @@ mod tests {
 
         let filters = precompute_weights(src_height, dst_height);
 
-        let dst = lanczos3_vertical(src, dst_height, &filters);
+        let dst = lanczos3_vertical(&src, dst_height, &filters);
 
         assert_eq!(dst.width, width);
         assert_eq!(dst.height, dst_height);
@@ -756,11 +746,7 @@ mod tests {
 
             assert!(
                 diff < 1e-5,
-                "Symmetry mismatch at index {}: Horizontal={} vs Vertical={}, diff={}",
-                i,
-                h_val,
-                v_val,
-                diff
+                "Symmetry mismatch at index {i}: Horizontal={h_val} vs Vertical={v_val}, diff={diff}"
             );
         }
 
@@ -787,11 +773,7 @@ mod tests {
             let diff = (val_h - val_v).abs();
             assert!(
                 diff < 1e-5,
-                "Full-Width Symmetry mismatch at y={}: H={} vs V={}, diff={}",
-                y,
-                val_h,
-                val_v,
-                diff
+                "Full-Width Symmetry mismatch at y={y}: H={val_h} vs V={val_v}, diff={diff}"
             );
         }
     }
@@ -837,9 +819,9 @@ mod tests {
                 let expect_g = y as f32;
                 let expect_b = (x + y) as f32;
 
-                assert_eq!(r_floats[idx], expect_r, "Red at {},{}", x, y);
-                assert_eq!(g_floats[idx], expect_g, "Green at {},{}", x, y);
-                assert_eq!(b_floats[idx], expect_b, "Blue at {},{}", x, y);
+                assert_eq!(r_floats[idx], expect_r, "Red at {x},{y}");
+                assert_eq!(g_floats[idx], expect_g, "Green at {x},{y}");
+                assert_eq!(b_floats[idx], expect_b, "Blue at {x},{y}");
                 idx += 1;
             }
         }

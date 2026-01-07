@@ -116,6 +116,8 @@ fn maximize(color: Rgb<u8>) -> Rgb<u8> {
     Rgb([half_r as u8, half_g as u8, half_b as u8])
 }
 
+// too many lines? too bad!
+#[allow(clippy::too_many_lines)]
 #[inline(always)]
 pub fn image(
     intensity_lookup: &IntensityMap<char>,
@@ -196,7 +198,7 @@ pub fn image(
     let vertical_filters = lanczos::precompute_weights(frames[0].height(), new_height);
 
     std::thread::scope(|s| {
-        for frame in frames.iter_mut() {
+        for frame in &mut frames {
             let horizontal_filters = &horizontal_filters;
             let vertical_filters = &vertical_filters;
             s.spawn(move || {
@@ -218,12 +220,12 @@ pub fn image(
     eprint!("\x1b[2K"); // clear the line
 
     #[allow(clippy::unused_enumerate_index)]
-    for (_frame_number, this_frame) in frames.iter().enumerate() {
+    for (frame_number, this_frame) in frames.iter().enumerate() {
         #[cfg(feature = "progress")]
         {
             eprintln!(
                 "Rasciizing frame {:}/{total_frame_count:}",
-                _frame_number + 1
+                frame_number + 1
             );
             eprint!("\x1b[A"); // move up 1 line for progress output
         }
@@ -240,13 +242,13 @@ pub fn image(
                 let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
                 if spicy {
                     // slightly randomize
-                    let seed_data: u64 = (pixel[0] as u64
-                        | (pixel[1] as u64) << 8
-                        | (pixel[2] as u64) << 16
-                        | (y as u64) << 24
-                        | (x as u64) << 32
-                        | (_frame_number as u64) << 40)
-                        ^ ((lum.to_bits() as u64).rotate_left(40));
+                    let seed_data: u64 = (u64::from(pixel[0])
+                        | u64::from(pixel[1]) << 8
+                        | u64::from(pixel[2]) << 16
+                        | u64::from(y) << 24
+                        | u64::from(x) << 32
+                        | (frame_number as u64) << 40)
+                        ^ (u64::from(lum.to_bits()).rotate_left(40));
 
                     let random_value: f32 = {
                         #[cfg(target_feature = "sse4.2")]
