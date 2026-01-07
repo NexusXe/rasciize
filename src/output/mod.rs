@@ -1,8 +1,6 @@
 use crate::*;
 use ab_glyph::FontRef;
 use image::{ImageReader, Rgb};
-use rand::rngs::SmallRng;
-use rand::{RngCore, SeedableRng};
 use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
@@ -223,22 +221,27 @@ pub fn image(
         for y in 0..img.height() {
             for x in 0..img.width() {
                 let pixel = img.get_pixel(x, y);
-                let mut lum = luminance(pixel[0], pixel[1], pixel[2]) / 255.0;
+                let lum = luminance(pixel[0], pixel[1], pixel[2]);
+                let mut lum_scaled = lum / 255.0;
                 if spicy {
-                    // slightly randomize, scaled based on the luminance of the pixel
-                    // use small rng for speed, seeded from the pixel's color and position
-                    let mut rng = SmallRng::seed_from_u64(
-                        ((u32::from(pixel[0])
-                            | (u32::from(pixel[1]) << 8)
-                            | (u32::from(pixel[2]) << 16)
-                            | (y << 24)) as u64)
-                            | u64::from(x) << 32,
-                    );
-                    let random_value =
-                        unsafe { fdiv_fast(rng.next_u32() as u8 as FloatPrecision, 255.0) };
-                    lum = unsafe { fadd_fast(lum, fmul_fast(fmul_fast(random_value, lum), 0.01)) };
+                    // slightly randomize
+                    let seed_data: u64 = (pixel[0] as u64 | (pixel[1] as u64) << 8 | (pixel[2] as u64) << 16 | (y as u64) << 24 | (x as u64) << 32 | (_frame_number as u64) << 40) ^ ((lum.to_bits() as u64).rotate_left(40));
+                    
+                    let random_value: f32 = {
+                        #[cfg(target_feature = "sse4.2")]
+                        unsafe {
+                            let hash = std::arch::x86_64::_mm_crc32_u64(0x045d_9f3b, seed_data);
+                            let bits = ((hash as u32) & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
+                            let res = f32::from_bits(bits);
+                            res - 1.5
+                        }
+                        #[cfg(not(target_feature = "sse4.2"))]
+                        0.0
+                    };
+
+                    lum_scaled = unsafe { fadd_fast(lum_scaled, fmul_fast(FloatPrecision::from(random_value), 0.0001)) };
                 }
-                let ch = find_nearest_optimized(intensity_lookup, lum).unwrap().1;
+                let ch = find_nearest_optimized(intensity_lookup, lum_scaled).unwrap().1;
                 let color = maximize(*pixel);
                 write!(
                     output_buffer,
