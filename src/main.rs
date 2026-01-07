@@ -22,7 +22,6 @@ const RASTER_SIZE: u16 = 32; // Size in pixels
 
 mod font;
 use font::*;
-
 mod output;
 use output::*;
 

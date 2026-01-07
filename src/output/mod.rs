@@ -1,10 +1,10 @@
 use crate::*;
 use ab_glyph::FontRef;
 use image::{ImageReader, Rgb};
+use std::intrinsics::prefetch_read_data;
 use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
-use std::intrinsics::prefetch_read_data;
 
 //mod resize; // unfinished
 
@@ -126,7 +126,8 @@ pub fn image(
 
     const IMG_SIZE_MAX: u32 = 128;
 
-    #[cfg(feature = "progress")] {
+    #[cfg(feature = "progress")]
+    {
         eprintln!("\nRanked {:} characters", intensity_lookup.len());
     }
 
@@ -138,13 +139,15 @@ pub fn image(
         let gif_decoder = image::codecs::gif::GifDecoder::new(input.into_inner())?;
         let gif_frames = gif_decoder.into_frames();
 
-        #[cfg(feature = "progress")] {
+        #[cfg(feature = "progress")]
+        {
             eprint!("\x1b[A\x1b[2K"); // move up 1 line for progress output and clear it
         }
 
         #[allow(clippy::unused_enumerate_index)]
         for (_idx, frame) in gif_frames.enumerate() {
-            #[cfg(feature = "progress")] {
+            #[cfg(feature = "progress")]
+            {
                 eprintln!("Decoded {_idx:} frame{}", if _idx <= 1 { "" } else { "s" });
                 eprint!("\x1b[A"); // move up 1 line for progress output
             }
@@ -156,7 +159,8 @@ pub fn image(
         frames.shrink_to_fit();
     } else {
         frames.push(input.decode()?);
-        #[cfg(feature = "progress")] {
+        #[cfg(feature = "progress")]
+        {
             eprintln!("Decoded 1 frame");
             eprint!("\x1b[A"); // move up 1 line for progress output
         }
@@ -164,14 +168,15 @@ pub fn image(
 
     let total_frame_count = frames.len();
 
-    #[cfg(feature = "progress")] {
+    #[cfg(feature = "progress")]
+    {
         eprint!("\x1b[2K"); // clear the line
     }
     // double the width of each frame to account for character aspect ratio
     #[allow(clippy::unused_enumerate_index)]
     for (_idx, frame) in frames.iter_mut().enumerate() {
-
-        #[cfg(feature = "progress")] {
+        #[cfg(feature = "progress")]
+        {
             eprintln!("Resizing frame {:}/{total_frame_count:}", _idx + 1);
             eprint!("\x1b[A"); // move up 1 line for progress output
         }
@@ -205,7 +210,8 @@ pub fn image(
 
     #[allow(clippy::unused_enumerate_index)]
     for (_frame_number, this_frame) in frames.iter().enumerate() {
-        #[cfg(feature = "progress")] {
+        #[cfg(feature = "progress")]
+        {
             eprintln!(
                 "Rasciizing frame {:}/{total_frame_count:}",
                 _frame_number + 1
@@ -225,8 +231,14 @@ pub fn image(
                 let mut lum_scaled = lum / 255.0;
                 if spicy {
                     // slightly randomize
-                    let seed_data: u64 = (pixel[0] as u64 | (pixel[1] as u64) << 8 | (pixel[2] as u64) << 16 | (y as u64) << 24 | (x as u64) << 32 | (_frame_number as u64) << 40) ^ ((lum.to_bits() as u64).rotate_left(40));
-                    
+                    let seed_data: u64 = (pixel[0] as u64
+                        | (pixel[1] as u64) << 8
+                        | (pixel[2] as u64) << 16
+                        | (y as u64) << 24
+                        | (x as u64) << 32
+                        | (_frame_number as u64) << 40)
+                        ^ ((lum.to_bits() as u64).rotate_left(40));
+
                     let random_value: f32 = {
                         #[cfg(target_feature = "sse4.2")]
                         unsafe {
@@ -239,9 +251,16 @@ pub fn image(
                         0.0
                     };
 
-                    lum_scaled = unsafe { fadd_fast(lum_scaled, fmul_fast(FloatPrecision::from(random_value), 0.0001)) };
+                    lum_scaled = unsafe {
+                        fadd_fast(
+                            lum_scaled,
+                            fmul_fast(FloatPrecision::from(random_value), 0.0001),
+                        )
+                    };
                 }
-                let ch = find_nearest_optimized(intensity_lookup, lum_scaled).unwrap().1;
+                let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
+                    .unwrap()
+                    .1;
                 let color = maximize(*pixel);
                 write!(
                     output_buffer,
@@ -263,7 +282,10 @@ pub fn image(
     }
     output_frames.shrink_to_fit();
     let end_time = std::time::Instant::now();
-    eprintln!("Rendering took {:} seconds", end_time.duration_since(start_time).as_secs_f32());
+    eprintln!(
+        "Rendering took {:} seconds",
+        end_time.duration_since(start_time).as_secs_f32()
+    );
 
     let stdout = io::stdout();
     let mut stdout_handle = io::BufWriter::new(stdout);
@@ -273,12 +295,18 @@ pub fn image(
     if output_frames.len() == 1 {
         stdout_handle.flush()?;
     } else {
-        
         loop {
             for (idx, output_frame) in output_frames.iter().enumerate() {
                 stdout_handle.flush()?;
                 stdout_handle.write_all(output_frame.as_bytes())?;
-                prefetch_read_data::<_, 2>(output_frames[if idx + 1 < output_frames.len() { idx + 1 } else { 0 }].as_ptr());
+                prefetch_read_data::<_, 2>(
+                    output_frames[if idx + 1 < output_frames.len() {
+                        idx + 1
+                    } else {
+                        0
+                    }]
+                    .as_ptr(),
+                );
                 //sleep(Duration::from_millis(75));
             }
         }
