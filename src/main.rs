@@ -14,7 +14,7 @@
 
 use ab_glyph::Font;
 use image::{AnimationDecoder, DynamicImage};
-use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast};
+use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 
 const FONT_TTF: &[u8] = include_bytes!("./fonts/CascadiaMono-Regular.ttf");
 const LUT_FONT_SIZE: u16 = 256; // Size in pixels

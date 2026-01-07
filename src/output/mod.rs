@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
 
-//mod resize; // unfinished
+mod lanczos;
 
 pub fn text(
     font: &FontRef<'static>,
@@ -104,7 +104,7 @@ fn maximize(color: Rgb<u8>) -> Rgb<u8> {
     if max_component == 0.0 {
         return Rgb([0, 0, 0]);
     }
-    let scale = 255.0 / max_component;
+    let scale = unsafe { fdiv_fast(255.0, max_component) };
     let maximum_r = unsafe { fmul_fast(FloatPrecision::from(color[0]), scale) };
     let maximum_g = unsafe { fmul_fast(FloatPrecision::from(color[1]), scale) };
     let maximum_b = unsafe { fmul_fast(FloatPrecision::from(color[2]), scale) };
@@ -172,37 +172,46 @@ pub fn image(
     {
         eprint!("\x1b[2K"); // clear the line
     }
-    // double the width of each frame to account for character aspect ratio
-    #[allow(clippy::unused_enumerate_index)]
-    for (_idx, frame) in frames.iter_mut().enumerate() {
-        #[cfg(feature = "progress")]
-        {
-            eprintln!("Resizing frame {:}/{total_frame_count:}", _idx + 1);
-            eprint!("\x1b[A"); // move up 1 line for progress output
+    let mut new_width = frames[0].width() * 2;
+    let mut new_height = frames[0].height();
+
+    if new_width > IMG_SIZE_MAX * 2 || new_height > IMG_SIZE_MAX * 2 {
+        let max_dim = u64::from(IMG_SIZE_MAX);
+        let w = u64::from(new_width);
+        let h = u64::from(new_height);
+
+        // Preserving aspect ratio fitting within IMG_SIZE_MAX x IMG_SIZE_MAX
+        if h <= w {
+            // Bound by width
+            new_width = IMG_SIZE_MAX;
+            new_height = (h * max_dim / w) as u32;
+        } else {
+            // Bound by height
+            new_height = IMG_SIZE_MAX;
+            new_width = (w * max_dim / h) as u32;
         }
-
-        let mut new_width = frame.width() * 2;
-        let mut new_height = frame.height();
-
-        if new_width > IMG_SIZE_MAX * 2 || new_height > IMG_SIZE_MAX * 2 {
-            let max_dim = u64::from(IMG_SIZE_MAX);
-            let w = u64::from(new_width);
-            let h = u64::from(new_height);
-
-            // Preserving aspect ratio fitting within IMG_SIZE_MAX x IMG_SIZE_MAX
-            if h <= w {
-                // Bound by width
-                new_width = IMG_SIZE_MAX;
-                new_height = (h * max_dim / w) as u32;
-            } else {
-                // Bound by height
-                new_height = IMG_SIZE_MAX;
-                new_width = (w * max_dim / h) as u32;
-            }
-        }
-
-        *frame = frame.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
     }
+    // double the width of each frame to account for character aspect ratio
+    let horizontal_filters = lanczos::precompute_weights(frames[0].width(), new_width);
+    let vertical_filters = lanczos::precompute_weights(frames[0].height(), new_height);
+
+    std::thread::scope(|s| {
+        for frame in frames.iter_mut() {
+            let horizontal_filters = &horizontal_filters;
+            let vertical_filters = &vertical_filters;
+            s.spawn(move || {
+                //*frame = frame.resize_exact(new_width, new_height, image::imageops::FilterType::Lanczos3);
+                *frame = lanczos::lanczos3_resize(
+                    frame,
+                    new_width,
+                    new_height,
+                    horizontal_filters,
+                    vertical_filters,
+                );
+            });
+        }
+    });
+
     let height = frames[0].height();
 
     let mut output_frames: Vec<String> = Vec::with_capacity(total_frame_count);
@@ -228,7 +237,7 @@ pub fn image(
             for x in 0..img.width() {
                 let pixel = img.get_pixel(x, y);
                 let lum = luminance(pixel[0], pixel[1], pixel[2]);
-                let mut lum_scaled = lum / 255.0;
+                let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
                 if spicy {
                     // slightly randomize
                     let seed_data: u64 = (pixel[0] as u64
@@ -245,7 +254,7 @@ pub fn image(
                             let hash = std::arch::x86_64::_mm_crc32_u64(0x045d_9f3b, seed_data);
                             let bits = ((hash as u32) & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
                             let res = f32::from_bits(bits);
-                            res - 1.5
+                            fsub_fast(res, 1.5)
                         }
                         #[cfg(not(target_feature = "sse4.2"))]
                         0.0
@@ -307,7 +316,7 @@ pub fn image(
                     }]
                     .as_ptr(),
                 );
-                //sleep(Duration::from_millis(75));
+                sleep(Duration::from_millis(25));
             }
         }
     }
