@@ -235,7 +235,7 @@ pub fn image(
         // row by row, pixel by pixel, get the luminance, find the nearest character, and print it to output using true colors obtained from maximize function
         let mut output_buffer =
             String::with_capacity(((this_frame.width() + 10) * this_frame.height()) as usize);
-        
+
         #[cfg(not(feature = "color"))]
         {
             output_buffer.push_str("\x1B[37m");
