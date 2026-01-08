@@ -2,10 +2,9 @@ use std::arch::x86_64::*;
 
 use image::DynamicImage;
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
-use std::simd::prelude::*;
 
 const LANCZOS_RADIUS: f32 = 3.0;
-const ROUNDING_MODE: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
+//const ROUNDING_MODE: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
 
 #[derive(Debug)]
 struct PlanarBuffer {
@@ -17,6 +16,7 @@ struct PlanarBuffer {
 }
 
 impl PlanarBuffer {
+    #[inline(always)]
     fn new(width: u32, height: u32) -> Self {
         let size_in_floats = (width * height) as usize;
         let size_in_vectors = size_in_floats.div_ceil(16);
@@ -35,56 +35,84 @@ impl PlanarBuffer {
         let height = frame.height();
         let pixel_count = (width * height) as usize;
 
-        // Calculate exact vector capacity needed
         let vec_capacity = pixel_count.div_ceil(16);
         let mut all_reds: Vec<__m512> = Vec::with_capacity(vec_capacity);
         let mut all_greens: Vec<__m512> = Vec::with_capacity(vec_capacity);
         let mut all_blues: Vec<__m512> = Vec::with_capacity(vec_capacity);
 
-        let mut pixels = frame.pixels();
+        let pixels = frame.as_flat_samples().samples;
 
-        loop {
-            let mut reds = [0u8; 64];
-            let mut greens = [0u8; 64];
-            let mut blues = [0u8; 64];
+        // VBMI De-interleaving Indices for 64 pixels (3 x 64 bytes = 192 bytes)
+        // We load 3 ZMM registers (V0, V1, V2) and produce 3 ZMM registers (R, G, B)
+        // R indices for V0/V1 and V1/V2
+        let mut r_idx_a = [0u8; 64];
+        let mut r_idx_b = [0u8; 64];
+        let mut g_idx_a = [0u8; 64];
+        let mut g_idx_b = [0u8; 64];
+        let mut b_idx_a = [0u8; 64];
+        let mut b_idx_b = [0u8; 64];
 
-            match pixels.next_chunk::<64>() {
-                Ok(chunk) => {
-                    for (i, p) in chunk.iter().enumerate() {
-                        reds[i] = p[0];
-                        greens[i] = p[1];
-                        blues[i] = p[2];
-                    }
+        for i in 0..64 {
+            // R: 0, 3, 6 ... 189
+            // G: 1, 4, 7 ... 190
+            // B: 2, 5, 8 ... 191
+            if i < 32 {
+                r_idx_a[i] = (i * 3) as u8;
+                g_idx_a[i] = (i * 3 + 1) as u8;
+                b_idx_a[i] = (i * 3 + 2) as u8;
+            } else {
+                r_idx_b[i - 32] = (i * 3) as u8;
+                g_idx_b[i - 32] = (i * 3 + 1) as u8;
+                b_idx_b[i - 32] = (i * 3 + 2) as u8;
+            }
+        }
 
-                    let r_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(reds)));
-                    let g_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(greens)));
-                    let b_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(blues)));
+        unsafe {
+            let mut chunks = pixels.chunks_exact(192);
+            for chunk in &mut chunks {
+                let v0 = _mm512_loadu_si512(chunk.as_ptr().cast());
+                let v1 = _mm512_loadu_si512(chunk.as_ptr().add(64).cast());
+                let v2 = _mm512_loadu_si512(chunk.as_ptr().add(128).cast());
 
-                    all_reds.extend_from_slice(&r_vec);
-                    all_greens.extend_from_slice(&g_vec);
-                    all_blues.extend_from_slice(&b_vec);
+                // De-interleave using VPERMI2B (VBMI)
+                // R0..31 from V0/V1, R32..63 from V1/V2
+                // Combine into single ZMM of R bytes (actually R is 64 bytes total)
+                // Wait, per_m2var_epi8 takes (low, idx, high).
+                // If idx > 63, it pulls from high.
+
+                // Let's refine: We need 64 bytes of R.
+                // V0 has R0..R21. V1 has R22..R42. V2 has R43..R63.
+                let r_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 0);
+                let g_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 1);
+                let b_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 2);
+
+                all_reds.extend_from_slice(&_mm512_cvtepu8_ps(r_bytes));
+                all_greens.extend_from_slice(&_mm512_cvtepu8_ps(g_bytes));
+                all_blues.extend_from_slice(&_mm512_cvtepu8_ps(b_bytes));
+            }
+
+            // Remainder
+            let remainder = chunks.remainder();
+            if !remainder.is_empty() {
+                // Scalar fallback for the very last few pixels is fine
+                let mut reds = [0u8; 64];
+                let mut greens = [0u8; 64];
+                let mut blues = [0u8; 64];
+                let mut count = 0;
+                for p in remainder.chunks_exact(3) {
+                    reds[count] = p[0];
+                    greens[count] = p[1];
+                    blues[count] = p[2];
+                    count += 1;
                 }
-                Err(remainder) => {
-                    let mut count = 0;
-                    for p in remainder {
-                        reds[count] = p[0];
-                        greens[count] = p[1];
-                        blues[count] = p[2];
-                        count += 1;
-                    }
-
-                    if count > 0 {
-                        let r_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(reds)));
-                        let g_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(greens)));
-                        let b_vec = _mm512_cvtepu8_ps(__m512i::from(u8x64::from_array(blues)));
-
-                        // Only take the vectors that contain valid data
-                        let vecs_needed = count.div_ceil(16);
-                        all_reds.extend_from_slice(&r_vec[0..vecs_needed]);
-                        all_greens.extend_from_slice(&g_vec[0..vecs_needed]);
-                        all_blues.extend_from_slice(&b_vec[0..vecs_needed]);
-                    }
-                    break;
+                if count > 0 {
+                    let r_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(reds.as_ptr().cast()));
+                    let g_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(greens.as_ptr().cast()));
+                    let b_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(blues.as_ptr().cast()));
+                    let needed = count.div_ceil(16);
+                    all_reds.extend_from_slice(&r_batch[..needed]);
+                    all_greens.extend_from_slice(&g_batch[..needed]);
+                    all_blues.extend_from_slice(&b_batch[..needed]);
                 }
             }
         }
@@ -98,24 +126,191 @@ impl PlanarBuffer {
         }
     }
 
+    #[inline(always)]
+    fn _mm512_permutex3var_epi8(v0: __m512i, v1: __m512i, v2: __m512i, channel: u8) -> __m512i {
+        let mut idx_low = [0u8; 64];
+        let mut idx_high = [0u8; 64];
+        let mut mask_val = 0u64;
+
+        for i in 0..64 {
+            let src = i as u32 * 3 + u32::from(channel);
+            if src < 128 {
+                idx_low[i] = src as u8;
+            } else {
+                idx_high[i] = (src - 64) as u8;
+                mask_val |= 1 << i;
+            }
+        }
+
+        unsafe {
+            let m = _cvtu64_mask64(mask_val);
+            let res_low =
+                _mm512_permutex2var_epi8(v0, _mm512_loadu_si512(idx_low.as_ptr().cast()), v1);
+            let res_high =
+                _mm512_permutex2var_epi8(v1, _mm512_loadu_si512(idx_high.as_ptr().cast()), v2);
+            _mm512_mask_blend_epi8(m, res_low, res_high)
+        }
+    }
+
     fn to_rgb8(&self) -> DynamicImage {
         let mut output = image::RgbImage::new(self.width, self.height);
+        let pixel_count = (self.width * self.height) as usize;
 
-        let red_slice = as_f32(&self.red);
-        let green_slice = as_f32(&self.green);
-        let blue_slice = as_f32(&self.blue);
+        unsafe {
+            let red_ptr = self.red.as_ptr().cast::<__m512>();
+            let green_ptr = self.green.as_ptr().cast::<__m512>();
+            let blue_ptr = self.blue.as_ptr().cast::<__m512>();
 
-        for (i, pixel) in output.pixels_mut().enumerate() {
-            // PlanarBuffer is guaranteed to have capacity for all pixels (padded to 16 floats)
-            // Clamping is necessary as Lanczos resampling can produce values outside [0, 255]
-            let r = red_slice[i].round().clamp(0.0, 255.0) as u8;
-            let g = green_slice[i].round().clamp(0.0, 255.0) as u8;
-            let b = blue_slice[i].round().clamp(0.0, 255.0) as u8;
+            let output_ptr = output.as_flat_samples_mut().samples.as_mut_ptr();
 
-            *pixel = image::Rgb([r, g, b]);
+            let mut pix = 0;
+            while pix + 64 <= pixel_count {
+                let r_batch = Self::pack_floats_to_u8(
+                    *red_ptr.add(pix / 16),
+                    *red_ptr.add(pix / 16 + 1),
+                    *red_ptr.add(pix / 16 + 2),
+                    *red_ptr.add(pix / 16 + 3),
+                );
+                let g_batch = Self::pack_floats_to_u8(
+                    *green_ptr.add(pix / 16),
+                    *green_ptr.add(pix / 16 + 1),
+                    *green_ptr.add(pix / 16 + 2),
+                    *green_ptr.add(pix / 16 + 3),
+                );
+                let b_batch = Self::pack_floats_to_u8(
+                    *blue_ptr.add(pix / 16),
+                    *blue_ptr.add(pix / 16 + 1),
+                    *blue_ptr.add(pix / 16 + 2),
+                    *blue_ptr.add(pix / 16 + 3),
+                );
+
+                let (v0, v1, v2) = Self::interleave_rgb(r_batch, g_batch, b_batch);
+
+                _mm512_storeu_si512(output_ptr.add(pix * 3).cast(), v0);
+                _mm512_storeu_si512(output_ptr.add(pix * 3 + 64).cast(), v1);
+                _mm512_storeu_si512(output_ptr.add(pix * 3 + 128).cast(), v2);
+
+                pix += 64;
+            }
+
+            // Remainder scalar fallback
+            let r_slice = as_f32(&self.red);
+            let g_slice = as_f32(&self.green);
+            let b_slice = as_f32(&self.blue);
+
+            for i in pix..pixel_count {
+                let r_val = r_slice[i].round().clamp(0.0, 255.0) as u8;
+                let g_val = g_slice[i].round().clamp(0.0, 255.0) as u8;
+                let b_val = b_slice[i].round().clamp(0.0, 255.0) as u8;
+                *output.get_pixel_mut(i as u32 % self.width, i as u32 / self.width) =
+                    image::Rgb([r_val, g_val, b_val]);
+            }
         }
 
         image::DynamicImage::ImageRgb8(output)
+    }
+
+    // Helper: Pack 64 floats to 64 bytes with clamping
+    #[inline(always)]
+    fn pack_floats_to_u8(v0: __m512, v1: __m512, v2: __m512, v3: __m512) -> __m512i {
+        unsafe {
+            // Round to nearest integer (cvteps_epi32)
+            let i0 = _mm512_cvttps_epi32(v0);
+            let i1 = _mm512_cvttps_epi32(v1);
+            let i2 = _mm512_cvttps_epi32(v2);
+            let i3 = _mm512_cvttps_epi32(v3);
+
+            // Pack with unsigned saturation to u8 (AVX-512F/BW/DQ)
+            let b0 = _mm512_cvtusepi32_epi8(i0); // 16 bytes in __m128i
+            let b1 = _mm512_cvtusepi32_epi8(i1);
+            let b2 = _mm512_cvtusepi32_epi8(i2);
+            let b3 = _mm512_cvtusepi32_epi8(i3);
+
+            // Combine 4 XMMs into one ZMM
+            _mm512_inserti32x4(
+                _mm512_inserti32x4(_mm512_inserti32x4(_mm512_castsi128_si512(b0), b1, 1), b2, 2),
+                b3,
+                3,
+            )
+        }
+    }
+
+    // Helper: Interleave planar R, G, B into packed RGB (VBMI)
+    #[inline(always)]
+    fn interleave_rgb(r: __m512i, g: __m512i, b: __m512i) -> (__m512i, __m512i, __m512i) {
+        // Define indices for the 3 output registers
+        let mut idx0 = [0u8; 64];
+        let mut idx1 = [0u8; 64];
+        let mut idx2 = [0u8; 64];
+
+        for i in 0..64 {
+            let pixel_idx = i / 3;
+            let channel = i % 3;
+            let val = if channel == 0 {
+                pixel_idx
+            } else if channel == 1 {
+                pixel_idx + 64
+            } else {
+                pixel_idx + 128
+            };
+            idx0[i] = val as u8;
+
+            let pixel_idx = (i + 64) / 3;
+            let channel = (i + 64) % 3;
+            let val = if channel == 0 {
+                pixel_idx
+            } else if channel == 1 {
+                pixel_idx + 64
+            } else {
+                pixel_idx + 128
+            };
+            idx1[i] = val as u8;
+
+            let pixel_idx = (i + 128) / 3;
+            let channel = (i + 128) % 3;
+            let val = if channel == 0 {
+                pixel_idx
+            } else if channel == 1 {
+                pixel_idx + 64
+            } else {
+                pixel_idx + 128
+            };
+            idx2[i] = val as u8;
+        }
+
+        let v0 = Self::interleave(r, g, b, &idx0);
+        let v1 = Self::interleave(r, g, b, &idx1);
+        let v2 = Self::interleave(r, g, b, &idx2);
+
+        (v0, v1, v2)
+    }
+
+    // compiles into a disgusting straight-through of instructions. how
+    #[inline(always)]
+    fn interleave(r: __m512i, g: __m512i, b: __m512i, raw_idx: &[u8; 64]) -> __m512i {
+        let mut idx_low = [0u8; 64];
+        let mut idx_high = [0u8; 64];
+        let mut mask_val = 0u64;
+
+        for (i, &src) in raw_idx.iter().enumerate() {
+            let src_val = u32::from(src);
+            if src_val < 128 {
+                idx_low[i] = src_val as u8;
+            } else {
+                idx_high[i] = (src_val - 64) as u8;
+                mask_val |= 1 << i;
+            }
+        }
+
+        unsafe {
+            let m = _cvtu64_mask64(mask_val);
+            let res_low =
+                _mm512_permutex2var_epi8(r, _mm512_loadu_si512(idx_low.as_ptr().cast()), g);
+            let res_high =
+                _mm512_permutex2var_epi8(g, _mm512_loadu_si512(idx_high.as_ptr().cast()), b);
+
+            _mm512_mask_blend_epi8(m, res_low, res_high)
+        }
     }
 }
 
@@ -123,24 +318,12 @@ impl PlanarBuffer {
 // converts 64 bytes to 64 single-precision floats
 #[inline(always)]
 fn _mm512_cvtepu8_ps(input: __m512i) -> [__m512; 4] {
-    // convert each byte to a 32-bit unsigned integer accross 4 different 512-bit destination vectors
-
-    // split __m512i into four __m128i
-    let byte_lanes: [__m128i; 4] = unsafe {
-        [
-            _mm512_castsi512_si128(input),
-            _mm512_extracti32x4_epi32(input, 1),
-            _mm512_extracti32x4_epi32(input, 2),
-            _mm512_extracti32x4_epi32(input, 3),
-        ]
-    };
-
     unsafe {
         [
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(byte_lanes[0])),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(byte_lanes[1])),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(byte_lanes[2])),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(byte_lanes[3])),
+            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(input))),
+            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 1))),
+            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 2))),
+            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 3))),
         ]
     }
 }
@@ -155,6 +338,7 @@ pub struct FilterBounds {
 
 pub type FilterBank = Vec<FilterBounds>;
 
+#[inline(always)]
 fn sinc(x: f32) -> f32 {
     if x == 0.0 {
         1.0
@@ -164,6 +348,7 @@ fn sinc(x: f32) -> f32 {
     }
 }
 
+#[inline(always)]
 fn lanczos3_kernel(x: f32) -> f32 {
     let x = x.abs();
     if x < LANCZOS_RADIUS {
@@ -173,7 +358,7 @@ fn lanczos3_kernel(x: f32) -> f32 {
     }
 }
 
-/// Function to precompute the lanczos3 kernel weights for a given scale
+/// Precompute the lanczos3 kernel weights for a given scale for use with `lanczos3_resize()`
 pub fn precompute_weights(src_size: u32, dst_size: u32) -> FilterBank {
     let scale = unsafe { fdiv_fast(src_size as f32, dst_size as f32) };
     let mut bounds = Vec::with_capacity(dst_size as usize);
@@ -269,25 +454,76 @@ unsafe fn lanczos3_horizontal_pass_avx512(
 
                 // Load base starting indices for this block of 16 pixels
                 let mut v_indices = _mm512_loadu_si512(indices_store.as_ptr().add(b * 16).cast());
-                let mut v_acc = _mm512_setzero_ps();
 
-                for t in 0..max_taps {
-                    // Load weights for tap `t` across 16 pixels
+                // Unrolling factor of 4 to hide FMA latency (Zen 5 FMA latency ~4 cycles)
+                let mut v_acc0 = _mm512_setzero_ps();
+                let mut v_acc1 = _mm512_setzero_ps();
+                let mut v_acc2 = _mm512_setzero_ps();
+                let mut v_acc3 = _mm512_setzero_ps();
+
+                let mut t = 0;
+                let v_one = _mm512_set1_epi32(1);
+                let v_two = _mm512_set1_epi32(2);
+                let v_three = _mm512_set1_epi32(3);
+                let v_four = _mm512_set1_epi32(4);
+
+                // Main unrolled loop
+                while t + 4 <= max_taps {
+                    // Tap 0
+                    let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
+                    let v_w0 = _mm512_loadu_ps(w_ptr0);
+                    // v_indices is already correct for t
+                    let v_idx0 = _mm512_min_epi32(v_indices, src_limit);
+                    let v_src0 = _mm512_i32gather_ps(v_idx0, src_row.cast(), 4);
+                    v_acc0 = _mm512_fmadd_ps(v_w0, v_src0, v_acc0);
+
+                    // Tap 1
+                    let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
+                    let v_w1 = _mm512_loadu_ps(w_ptr1);
+                    let v_idx1_raw = _mm512_add_epi32(v_indices, v_one);
+                    let v_idx1 = _mm512_min_epi32(v_idx1_raw, src_limit);
+                    let v_src1 = _mm512_i32gather_ps(v_idx1, src_row.cast(), 4);
+                    v_acc1 = _mm512_fmadd_ps(v_w1, v_src1, v_acc1);
+
+                    // Tap 2
+                    let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
+                    let v_w2 = _mm512_loadu_ps(w_ptr2);
+                    let v_idx2_raw = _mm512_add_epi32(v_indices, v_two);
+                    let v_idx2 = _mm512_min_epi32(v_idx2_raw, src_limit);
+                    let v_src2 = _mm512_i32gather_ps(v_idx2, src_row.cast(), 4);
+                    v_acc2 = _mm512_fmadd_ps(v_w2, v_src2, v_acc2);
+
+                    // Tap 3
+                    let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
+                    let v_w3 = _mm512_loadu_ps(w_ptr3);
+                    let v_idx3_raw = _mm512_add_epi32(v_indices, v_three);
+                    let v_idx3 = _mm512_min_epi32(v_idx3_raw, src_limit);
+                    let v_src3 = _mm512_i32gather_ps(v_idx3, src_row.cast(), 4);
+                    v_acc3 = _mm512_fmadd_ps(v_w3, v_src3, v_acc3);
+
+                    t += 4;
+                    v_indices = _mm512_add_epi32(v_indices, v_four);
+                }
+
+                // Handle remaining taps
+                while t < max_taps {
                     let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
                     let v_w = _mm512_loadu_ps(w_ptr);
 
-                    // Clamp indices to image bounds to ensure safe gather
                     let v_idx_clamped = _mm512_min_epi32(v_indices, src_limit);
-
-                    // Gather source pixels: dst[i] uses src[indices[i]]
                     let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
 
-                    // Accumulate: acc += weight * src
-                    v_acc = _mm512_fmadd_round_ps(v_w, v_src, v_acc, ROUNDING_MODE);
+                    // Use acc0 for remainder
+                    v_acc0 = _mm512_fmadd_ps(v_w, v_src, v_acc0);
 
-                    // Increment indices to point to the next source pixel for the next tap
-                    v_indices = _mm512_add_epi32(v_indices, _mm512_set1_epi32(1));
+                    t += 1;
+                    v_indices = _mm512_add_epi32(v_indices, v_one);
                 }
+
+                // Sum accumulators
+                let v_acc01 = _mm512_add_ps(v_acc0, v_acc1);
+                let v_acc23 = _mm512_add_ps(v_acc2, v_acc3);
+                let v_acc = _mm512_add_ps(v_acc01, v_acc23);
 
                 // Store results
                 _mm512_mask_storeu_ps(dst_row.add(b * 16).cast(), mask, v_acc);
@@ -358,15 +594,69 @@ unsafe fn lanczos3_vertical_pass_avx512(
 
         unsafe {
             for (y_dst, b) in v_bounds.iter().enumerate() {
-                let mut acc = _mm512_setzero_ps();
+                let mut acc0 = _mm512_setzero_ps();
+                let mut acc1 = _mm512_setzero_ps();
+                let mut acc2 = _mm512_setzero_ps();
+                let mut acc3 = _mm512_setzero_ps();
 
-                // Lanczos3 window of 6 vertical taps
-                for (i, &weight) in b.values.iter().enumerate() {
+                let taps = b.values.len();
+                let mut i = 0;
+
+                // Optimization: Hoist boundary check.
+                // If the entire filter footprint is within bounds, skip clamping in the inner loop.
+                let is_safe = (b.start_index + taps) <= height as usize;
+
+                if is_safe {
+                    while i + 4 <= taps {
+                        let start_y = b.start_index + i;
+
+                        // Tap 0
+                        let w0 = _mm512_set1_ps(b.values[i]);
+                        let ptr0 = src_intermediate
+                            .as_ptr()
+                            .add(start_y * width as usize + x_chunk as usize);
+                        let p0 = _mm512_maskz_loadu_ps(mask, ptr0);
+                        acc0 = _mm512_fmadd_ps(p0, w0, acc0);
+
+                        // Tap 1
+                        let w1 = _mm512_set1_ps(b.values[i + 1]);
+                        let ptr1 = src_intermediate
+                            .as_ptr()
+                            .add((start_y + 1) * width as usize + x_chunk as usize);
+                        let p1 = _mm512_maskz_loadu_ps(mask, ptr1);
+                        acc1 = _mm512_fmadd_ps(p1, w1, acc1);
+
+                        // Tap 2
+                        let w2 = _mm512_set1_ps(b.values[i + 2]);
+                        let ptr2 = src_intermediate
+                            .as_ptr()
+                            .add((start_y + 2) * width as usize + x_chunk as usize);
+                        let p2 = _mm512_maskz_loadu_ps(mask, ptr2);
+                        acc2 = _mm512_fmadd_ps(p2, w2, acc2);
+
+                        // Tap 3
+                        let w3 = _mm512_set1_ps(b.values[i + 3]);
+                        let ptr3 = src_intermediate
+                            .as_ptr()
+                            .add((start_y + 3) * width as usize + x_chunk as usize);
+                        let p3 = _mm512_maskz_loadu_ps(mask, ptr3);
+                        acc3 = _mm512_fmadd_ps(p3, w3, acc3);
+
+                        i += 4;
+                    }
+
+                    #[allow(deprecated)]
+                    {
+                        debug_assert_eq!(_MM_GET_FLUSH_ZERO_MODE(), _MM_FLUSH_ZERO_ON);
+                    }
+                }
+
+                // Fallback loop for remainder and unsafe rows (edges)
+                while i < taps {
+                    let weight = b.values[i];
                     let weight_vec = _mm512_set1_ps(weight);
 
-                    // Calculate the pointer to the start of the 16-pixel chunk in the source row
                     let src_y = b.start_index + i;
-                    // Clamp src_y to the last row to prevent OOB reads
                     let clamped_y = if src_y >= height as usize {
                         height - 1
                     } else {
@@ -377,12 +667,16 @@ unsafe fn lanczos3_vertical_pass_avx512(
                         .as_ptr()
                         .add((clamped_y * width + x_chunk) as usize);
 
-                    // Load 16 horizontal pixels from the source row
                     let pixels = _mm512_maskz_loadu_ps(mask, src_ptr);
 
-                    // acc += pixels * weight
-                    acc = _mm512_fmadd_round_ps(pixels, weight_vec, acc, ROUNDING_MODE);
+                    // Accumulate into acc0
+                    acc0 = _mm512_fmadd_ps(pixels, weight_vec, acc0);
+                    i += 1;
                 }
+
+                let acc01 = _mm512_add_ps(acc0, acc1);
+                let acc23 = _mm512_add_ps(acc2, acc3);
+                let acc = _mm512_add_ps(acc01, acc23);
 
                 // Store the 16 results into the destination row
                 let dst_ptr = dst
@@ -431,6 +725,12 @@ pub fn lanczos3_resize(
     horizontal_filters: &FilterBank,
     vertical_filters: &FilterBank,
 ) -> DynamicImage {
+    // set this again for good measure
+    #[allow(deprecated)] // too damn bad
+    unsafe {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    }
+
     let src = PlanarBuffer::from_rgb8(input);
     let dst = lanczos3_vertical(
         &lanczos3_horizontal(&src, dst_width, horizontal_filters),

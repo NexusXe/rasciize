@@ -1,6 +1,7 @@
 use crate::*;
 use ab_glyph::FontRef;
 use image::{ImageReader, Rgb};
+use std::arch::x86_64::*;
 use std::intrinsics::prefetch_read_data;
 use std::io::{self, Write};
 use std::thread::sleep;
@@ -131,6 +132,14 @@ pub fn image(
     #[cfg(feature = "progress")]
     {
         eprintln!("\nRanked {:} characters", intensity_lookup.len());
+    }
+
+    // nuclear option: set mxcsr to flush all denormals to zero
+    // using embedded rounding modes causes extra load instructions to be generated
+    // since you can't use embedded rounding modes with memory sources
+    #[allow(deprecated)] // too damn bad
+    unsafe {
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     }
 
     let input = ImageReader::open(filename)?;
