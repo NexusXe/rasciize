@@ -235,6 +235,12 @@ pub fn image(
         // row by row, pixel by pixel, get the luminance, find the nearest character, and print it to output using true colors obtained from maximize function
         let mut output_buffer =
             String::with_capacity(((this_frame.width() + 10) * this_frame.height()) as usize);
+        
+        #[cfg(not(feature = "color"))]
+        {
+            output_buffer.push_str("\x1B[37m");
+        }
+
         for y in 0..img.height() {
             for x in 0..img.width() {
                 let pixel = img.get_pixel(x, y);
@@ -272,13 +278,19 @@ pub fn image(
                 let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
                     .unwrap()
                     .1;
-                let color = maximize(*pixel);
-                write!(
-                    output_buffer,
-                    "\x1b[38;2;{};{};{}m{ch}",
-                    color[0], color[1], color[2]
-                    //255, 255, 255
-                )?;
+                #[cfg(feature = "color")]
+                {
+                    let color = maximize(*pixel);
+                    write!(
+                        output_buffer,
+                        "\x1b[38;2;{};{};{}m{ch}",
+                        color[0], color[1], color[2]
+                    )?;
+                }
+                #[cfg(not(feature = "color"))]
+                {
+                    write!(output_buffer, "{}", ch)?;
+                }
             }
             output_buffer.push('\n');
         }

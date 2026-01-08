@@ -38,24 +38,30 @@ pub fn get_coverage_array(
 
 #[inline]
 pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
-    // horrific hack to try and filter out weird glyphs that aren't really characters and might not show up as monospaced
-    let standard_glyph_width_wide = font
-        .outline_glyph(font.glyph_id('M').with_scale(PxScale::from(font_size)))?
-        .px_bounds()
-        .width();
-    let standard_glyph_width_narrow = font
-        .outline_glyph(font.glyph_id('i').with_scale(PxScale::from(font_size)))?
-        .px_bounds()
-        .width();
     let outlined_glyph: OutlinedGlyph =
         font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
     let bounds = outlined_glyph.px_bounds();
-    if unsafe {
-        fsub_fast(bounds.width(), standard_glyph_width_wide).abs() > font_size.sqrt()
-            && (fsub_fast(bounds.width(), standard_glyph_width_narrow).abs() > font_size.sqrt())
-    } {
-        return None;
+
+    #[cfg(not(feature = "ascii-only"))]
+    {
+        // horrific hack to try and filter out weird glyphs that aren't really characters and might not show up as monospaced
+        let standard_glyph_width_wide = font
+            .outline_glyph(font.glyph_id('M').with_scale(PxScale::from(font_size)))?
+            .px_bounds()
+            .width();
+        let standard_glyph_width_narrow = font
+            .outline_glyph(font.glyph_id('i').with_scale(PxScale::from(font_size)))?
+            .px_bounds()
+            .width();
+
+        if unsafe {
+            fsub_fast(bounds.width(), standard_glyph_width_wide).abs() > font_size.sqrt()
+                && (fsub_fast(bounds.width(), standard_glyph_width_narrow).abs() > font_size.sqrt())
+        } {
+            return None;
+        }
     }
+
     let mut sum: u32 = 0;
     outlined_glyph.draw(|_, _, coverage| {
         let scaled_coverage = unsafe { fmul_fast(coverage, 255.0) } as u8;
@@ -114,6 +120,11 @@ pub fn prepare_font<const LUT_FONT_SIZE: u16>(
     intensity_lookup.insert(OrderedFloat(1.0), '█');
 
     for (id, character) in font.codepoint_ids() {
+        #[cfg(feature = "ascii-only")]
+        if !character.is_ascii() {
+            continue;
+        }
+
         if let Some(mut intensity) = get_intensity(&font, f32::from(LUT_FONT_SIZE), id) {
             while intensity_lookup
                 .try_insert(OrderedFloat(intensity), character)
