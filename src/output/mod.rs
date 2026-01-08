@@ -8,6 +8,8 @@ use std::time::Duration;
 
 mod lanczos;
 
+const IMG_SIZE_MAX: u32 = 64;
+
 pub fn text(
     font: &FontRef<'static>,
     intensity_lookup: &IntensityMap<char>,
@@ -125,8 +127,6 @@ pub fn image(
     spicy: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::fmt::Write;
-
-    const IMG_SIZE_MAX: u32 = 128;
 
     #[cfg(feature = "progress")]
     {
@@ -277,6 +277,7 @@ pub fn image(
                     output_buffer,
                     "\x1b[38;2;{};{};{}m{ch}",
                     color[0], color[1], color[2]
+                    //255, 255, 255
                 )?;
             }
             output_buffer.push('\n');
@@ -318,7 +319,7 @@ pub fn image(
                     }]
                     .as_ptr(),
                 );
-                sleep(Duration::from_millis(25));
+                sleep(Duration::from_millis(15));
             }
         }
     }
