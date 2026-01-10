@@ -5,11 +5,13 @@ use std::arch::x86_64::*;
 use std::intrinsics::prefetch_read_data;
 use std::io::{self, Write};
 use std::thread::sleep;
-use std::time::Duration;
+
+use std::time::{Duration, Instant};
 
 mod lanczos;
 
-const IMG_SIZE_MAX: u32 = 64;
+const IMG_SIZE_MAX: u32 = 2048;
+const ESCAPE: char = '\x1b';
 
 pub fn text(
     font: &FontRef<'static>,
@@ -51,7 +53,7 @@ pub fn text(
     }
 
     // Set the text color to a warm orange
-    print!("\x1b[38;2;243;123;33m");
+    print!("{ESCAPE}[38;2;243;123;33m");
 
     // Now print the output row by row. Some characters won't have as many rows as others, so use checked indexing.
     let max_height = output.iter().map(std::vec::Vec::len).max().unwrap_or(0);
@@ -75,7 +77,7 @@ pub fn text(
         println!();
     }
 
-    print!("\x1b[0m"); // Reset terminal formatting
+    print!("{ESCAPE}[0m"); // Reset terminal formatting
     io::stdout().flush()?;
 
     let mut input = String::new();
@@ -143,7 +145,14 @@ pub fn image(
     }
 
     let input = ImageReader::open(filename)?;
-    let start_time = std::time::Instant::now();
+
+    let _start_time: Instant;
+
+    #[cfg(feature = "progress")]
+    {
+        _start_time = std::time::Instant::now();
+    }
+
     let mut frames = Vec::new();
     if let Some(image::ImageFormat::Gif) = input.format() {
         // crazy shuffling between DynamicImage is fine because it's done once
@@ -152,7 +161,7 @@ pub fn image(
 
         #[cfg(feature = "progress")]
         {
-            eprint!("\x1b[A\x1b[2K"); // move up 1 line for progress output and clear it
+            eprint!("{ESCAPE}[A{ESCAPE}[2K"); // move up 1 line for progress output and clear it
         }
 
         #[allow(clippy::unused_enumerate_index)]
@@ -160,7 +169,7 @@ pub fn image(
             #[cfg(feature = "progress")]
             {
                 eprintln!("Decoded {_idx:} frame{}", if _idx <= 1 { "" } else { "s" });
-                eprint!("\x1b[A"); // move up 1 line for progress output
+                eprint!("{ESCAPE}[A"); // move up 1 line for progress output
             }
 
             frames.push(DynamicImage::ImageRgb8(
@@ -173,7 +182,7 @@ pub fn image(
         #[cfg(feature = "progress")]
         {
             eprintln!("Decoded 1 frame");
-            eprint!("\x1b[A"); // move up 1 line for progress output
+            eprint!("{ESCAPE}[A"); // move up 1 line for progress output
         }
     }
 
@@ -181,7 +190,7 @@ pub fn image(
 
     #[cfg(feature = "progress")]
     {
-        eprint!("\x1b[2K"); // clear the line
+        eprint!("{ESCAPE}[2K"); // clear the line
     }
     let mut new_width = frames[0].width() * 2;
     let mut new_height = frames[0].height();
@@ -207,6 +216,7 @@ pub fn image(
     let vertical_filters = lanczos::precompute_weights(frames[0].height(), new_height);
 
     std::thread::scope(|s| {
+        // resizing loop
         for frame in &mut frames {
             let horizontal_filters = &horizontal_filters;
             let vertical_filters = &vertical_filters;
@@ -226,104 +236,154 @@ pub fn image(
     let height = frames[0].height();
 
     let mut output_frames: Vec<String> = Vec::with_capacity(total_frame_count);
-    eprint!("\x1b[2K"); // clear the line
+    eprint!("{ESCAPE}[2K"); // clear the line
 
     #[allow(clippy::unused_enumerate_index)]
-    for (frame_number, this_frame) in frames.iter().enumerate() {
-        #[cfg(feature = "progress")]
+    output_frames.resize(total_frame_count, String::new());
+
+    #[cfg(feature = "progress")]
+    {
+        eprintln!("Rasciizing frames...");
+        eprint!("{ESCAPE}[A");
+    }
+
+    std::thread::scope(|s| {
+        for (frame_number, (this_frame, output_frame_slot)) in
+            frames.iter().zip(output_frames.iter_mut()).enumerate()
         {
-            eprintln!(
-                "Rasciizing frame {:}/{total_frame_count:}",
-                frame_number + 1
-            );
-            eprint!("\x1b[A"); // move up 1 line for progress output
-        }
-
-        let img = this_frame.to_rgb8();
-
-        // row by row, pixel by pixel, get the luminance, find the nearest character, and print it to output using true colors obtained from maximize function
-        let mut output_buffer =
-            String::with_capacity(((this_frame.width() + 10) * this_frame.height()) as usize);
-
-        #[cfg(not(feature = "color"))]
-        {
-            output_buffer.push_str("\x1B[37m");
-        }
-
-        for y in 0..img.height() {
-            for x in 0..img.width() {
-                let pixel = img.get_pixel(x, y);
-                let lum = luminance(pixel[0], pixel[1], pixel[2]);
-                let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
-                if spicy {
-                    // slightly randomize
-                    let seed_data: u64 = (u64::from(pixel[0])
-                        | u64::from(pixel[1]) << 8
-                        | u64::from(pixel[2]) << 16
-                        | u64::from(y) << 24
-                        | u64::from(x) << 32
-                        | (frame_number as u64) << 40)
-                        ^ (u64::from(lum.to_bits()).rotate_left(40));
-
-                    let random_value: f32 = {
-                        #[cfg(target_feature = "sse4.2")]
-                        unsafe {
-                            let hash = std::arch::x86_64::_mm_crc32_u64(0x045d_9f3b, seed_data);
-                            let bits = ((hash as u32) & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
-                            let res = f32::from_bits(bits);
-                            fsub_fast(res, 1.5)
-                        }
-                        #[cfg(not(target_feature = "sse4.2"))]
-                        0.0
-                    };
-
-                    lum_scaled = unsafe {
-                        fadd_fast(
-                            lum_scaled,
-                            fmul_fast(FloatPrecision::from(random_value), 0.0001),
-                        )
-                    };
-                }
-                let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
-                    .unwrap()
-                    .1;
-                #[cfg(feature = "color")]
+            let intensity_lookup = &intensity_lookup;
+            s.spawn(move || {
+                #[cfg(feature = "progress")]
                 {
-                    let color = maximize(*pixel);
-                    write!(
-                        output_buffer,
-                        "\x1b[38;2;{};{};{}m{ch}",
-                        color[0], color[1], color[2]
-                    )?;
+                    eprintln!(
+                        "Rasciizing frame {:}/{total_frame_count:}",
+                        frame_number + 1
+                    );
+                    eprint!("{ESCAPE}[A"); // move up 1 line for progress output
                 }
+                let img = this_frame.to_rgb8();
+
+                // row by row, pixel by pixel, get the luminance, find the nearest character, and print it to output using true colors obtained from maximize function
+                let mut output_buffer = String::with_capacity(
+                    ((this_frame.width() + 10) * this_frame.height()) as usize,
+                );
+
                 #[cfg(not(feature = "color"))]
                 {
-                    write!(output_buffer, "{}", ch)?;
+                    output_buffer.push_str("{ESCAPE}[37m");
                 }
-            }
-            output_buffer.push('\n');
+
+                for y in 0..img.height() {
+                    for x in 0..img.width() {
+                        let pixel = img.get_pixel(x, y);
+                        let lum = luminance(pixel[0], pixel[1], pixel[2]);
+                        let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
+                        if spicy {
+                            // slightly randomize
+                            let seed_data: u64 = (u64::from(pixel[0])
+                                | u64::from(pixel[1]) << 8
+                                | u64::from(pixel[2]) << 16
+                                | u64::from(y) << 24
+                                | u64::from(x) << 32
+                                | (frame_number as u64) << 40)
+                                ^ (u64::from(lum.to_bits()).rotate_left(40));
+
+                            let random_value: f32 = {
+                                #[cfg(target_feature = "sse4.2")]
+                                unsafe {
+                                    let hash =
+                                        std::arch::x86_64::_mm_crc32_u64(0x045d_9f3b, seed_data);
+                                    let bits = ((hash as u32) & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
+                                    let res = f32::from_bits(bits);
+                                    fsub_fast(res, 1.5)
+                                }
+                                #[cfg(not(target_feature = "sse4.2"))]
+                                0.0
+                            };
+
+                            lum_scaled = unsafe {
+                                fadd_fast(
+                                    lum_scaled,
+                                    fmul_fast(FloatPrecision::from(random_value), 0.0001),
+                                )
+                            };
+                        }
+                        let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
+                            .unwrap()
+                            .1;
+                        #[cfg(feature = "truecolor")]
+                        {
+                            let color = maximize(*pixel);
+                            write!(
+                                output_buffer,
+                                "{ESCAPE}[38;2;{};{};{}m{ch}",
+                                color[0], color[1], color[2]
+                            )
+                            .unwrap();
+                        }
+
+                        #[cfg(not(feature = "color"))]
+                        {
+                            write!(output_buffer, "{}", ch).unwrap();
+                        }
+
+                        #[cfg(all(not(feature = "truecolor"), feature = "color"))]
+                        {
+                            let color = maximize(*pixel);
+                            // map to closest 16 color palette color
+                            let r = if color[0] > 127 { 1 } else { 0 };
+                            let g = if color[1] > 127 { 2 } else { 0 };
+                            let b = if color[2] > 127 { 4 } else { 0 };
+                            let intensity = if color[0] > 200 || color[1] > 200 || color[2] > 200 {
+                                60
+                            } else {
+                                0
+                            };
+                            write!(
+                                output_buffer,
+                                "{ESCAPE}[{}m{ch}",
+                                30 + r + g + b + intensity
+                            )
+                            .unwrap();
+                        }
+                    }
+                    #[cfg(all(not(feature = "truecolor"), feature = "color"))]
+                    {
+                        // reset color
+                        //output_buffer.push_str(format!("{ESCAPE}[0m"));
+                        write!(output_buffer, "{ESCAPE}[0m").unwrap();
+                    }
+                    output_buffer.push('\n');
+                }
+
+                // Delete next line
+                //output_buffer.push_str("{ESCAPE}[B{ESCAPE}[M{ESCAPE}[A");
+
+                if total_frame_count > 1 {
+                    output_buffer.push_str(format!("{ESCAPE}[{height}A").as_str()); // move up N lines
+                }
+
+                *output_frame_slot = output_buffer;
+            });
         }
-
-        // Delete next line
-        //output_buffer.push_str("\x1b[B\x1b[M\x1b[A");
-
-        if frames.len() > 1 {
-            output_buffer.push_str(format!("\x1b[{height}A").as_str()); // move up N lines
-        }
-
-        output_frames.push(output_buffer);
-    }
+    });
     output_frames.shrink_to_fit();
-    let end_time = std::time::Instant::now();
-    eprintln!(
-        "Rendering took {:} seconds",
-        end_time.duration_since(start_time).as_secs_f32()
-    );
+
+    #[cfg(feature = "progress")]
+    {
+        let end_time = std::time::Instant::now();
+
+        eprintln!(
+            "Rendering took {:} seconds",
+            end_time.duration_since(_start_time).as_secs_f32()
+        );
+    }
 
     let stdout = io::stdout();
     let mut stdout_handle = io::BufWriter::new(stdout);
 
     stdout_handle.write_all(output_frames[0].as_bytes())?;
+    //std::hint::black_box(output_frames[0].as_bytes());
 
     if output_frames.len() == 1 {
         stdout_handle.flush()?;
@@ -332,6 +392,7 @@ pub fn image(
             for (idx, output_frame) in output_frames.iter().enumerate() {
                 stdout_handle.flush()?;
                 stdout_handle.write_all(output_frame.as_bytes())?;
+                //std::hint::black_box(output_frame);
                 prefetch_read_data::<_, 2>(
                     output_frames[if idx + 1 < output_frames.len() {
                         idx + 1
