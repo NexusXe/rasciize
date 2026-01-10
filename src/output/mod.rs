@@ -457,13 +457,15 @@ pub fn image(
     let stdout = io::stdout();
     let mut stdout_handle = io::BufWriter::new(stdout);
 
+    let mut looped = false;
     stdout_handle.write_all(output_frames[0].as_bytes())?;
 
     if output_frames.len() == 1 {
         stdout_handle.flush()?;
     } else {
         loop {
-            for (idx, output_frame) in output_frames.iter().enumerate() {
+            for (idx, output_frame) in output_frames.iter().enumerate().skip(usize::from(!looped)) {
+                looped = true;
                 stdout_handle.flush()?;
                 stdout_handle.write_all(output_frame.as_bytes())?;
                 prefetch_read_data::<_, 2>(
