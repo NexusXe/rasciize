@@ -325,6 +325,12 @@ pub fn image(
                         (*ch, color)
                     };
 
+                #[cfg(feature = "truecolor")]
+                let mut last_color: Option<Rgb<u8>> = None;
+
+                #[cfg(all(not(feature = "truecolor"), feature = "color"))]
+                let mut last_ansi_color: Option<u8> = None;
+
                 for y in 0..img.height() {
                     let mut skip_count = 0;
                     for x in 0..img.width() {
@@ -378,17 +384,21 @@ pub fn image(
 
                             #[cfg(feature = "truecolor")]
                             {
-                                write!(
-                                    output_buffer,
-                                    "{ESCAPE}[38;2;{};{};{}m{ch}",
-                                    color[0], color[1], color[2]
-                                )
-                                .unwrap();
+                                if last_color != Some(color) {
+                                    write!(
+                                        output_buffer,
+                                        "{ESCAPE}[38;2;{};{};{}m",
+                                        color[0], color[1], color[2]
+                                    )
+                                    .unwrap();
+                                    last_color = Some(color);
+                                }
+                                write!(output_buffer, "{ch}").unwrap();
                             }
 
                             #[cfg(not(feature = "color"))]
                             {
-                                write!(output_buffer, "{}", ch).unwrap();
+                                write!(output_buffer, "{ch}").unwrap();
                             }
 
                             #[cfg(all(not(feature = "truecolor"), feature = "color"))]
@@ -403,12 +413,13 @@ pub fn image(
                                     } else {
                                         0
                                     };
-                                write!(
-                                    output_buffer,
-                                    "{ESCAPE}[{}m{ch}",
-                                    30 + r + g + b + intensity
-                                )
-                                .unwrap();
+                                let ansi_code = 30 + r + g + b + intensity;
+
+                                if last_ansi_color != Some(ansi_code) {
+                                    write!(output_buffer, "{ESCAPE}[{}m", ansi_code).unwrap();
+                                    last_ansi_color = Some(ansi_code);
+                                }
+                                write!(output_buffer, "{}", ch).unwrap();
                             }
                         }
                     }
