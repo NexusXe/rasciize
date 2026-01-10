@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 mod lanczos;
 
-const IMG_SIZE_MAX: u32 = 2048;
+const IMG_SIZE_MAX: u32 = 256;
 const ESCAPE: char = '\x1b';
 
 pub fn text(
@@ -247,6 +247,7 @@ pub fn image(
         eprint!("{ESCAPE}[A");
     }
 
+    let frames_ref = &frames;
     std::thread::scope(|s| {
         for (frame_number, (this_frame, output_frame_slot)) in
             frames.iter().zip(output_frames.iter_mut()).enumerate()
@@ -262,6 +263,11 @@ pub fn image(
                     eprint!("{ESCAPE}[A"); // move up 1 line for progress output
                 }
                 let img = this_frame.to_rgb8();
+                let prev_img = if frame_number > 0 {
+                    Some(frames_ref[frame_number - 1].to_rgb8())
+                } else {
+                    None
+                };
 
                 // row by row, pixel by pixel, get the luminance, find the nearest character, and print it to output using true colors obtained from maximize function
                 let mut output_buffer = String::with_capacity(
@@ -273,19 +279,22 @@ pub fn image(
                     output_buffer.push_str("{ESCAPE}[37m");
                 }
 
-                for y in 0..img.height() {
-                    for x in 0..img.width() {
-                        let pixel = img.get_pixel(x, y);
-                        let lum = luminance(pixel[0], pixel[1], pixel[2]);
+                let get_pixel_info =
+                    |x: u32, y: u32, p: &Rgb<u8>, f_num: usize| -> (char, Rgb<u8>) {
+                        let sc_r = p[0];
+                        let sc_g = p[1];
+                        let sc_b = p[2];
+                        let lum = luminance(sc_r, sc_g, sc_b);
                         let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
+
                         if spicy {
                             // slightly randomize
-                            let seed_data: u64 = (u64::from(pixel[0])
-                                | u64::from(pixel[1]) << 8
-                                | u64::from(pixel[2]) << 16
+                            let seed_data: u64 = (u64::from(sc_r)
+                                | u64::from(sc_g) << 8
+                                | u64::from(sc_b) << 16
                                 | u64::from(y) << 24
                                 | u64::from(x) << 32
-                                | (frame_number as u64) << 40)
+                                | (f_num as u64) << 40)
                                 ^ (u64::from(lum.to_bits()).rotate_left(40));
 
                             let random_value: f32 = {
@@ -311,46 +320,101 @@ pub fn image(
                         let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
                             .unwrap()
                             .1;
-                        #[cfg(feature = "truecolor")]
-                        {
-                            let color = maximize(*pixel);
-                            write!(
-                                output_buffer,
-                                "{ESCAPE}[38;2;{};{};{}m{ch}",
-                                color[0], color[1], color[2]
-                            )
-                            .unwrap();
+
+                        let color = maximize(*p);
+                        (*ch, color)
+                    };
+
+                for y in 0..img.height() {
+                    let mut skip_count = 0;
+                    for x in 0..img.width() {
+                        let pixel = img.get_pixel(x, y);
+                        let (ch, color) = get_pixel_info(x, y, pixel, frame_number);
+
+                        let mut is_redundant = false;
+                        if let Some(ref p_img) = prev_img {
+                            let prev_pixel = p_img.get_pixel(x, y);
+                            let (prev_ch, prev_color) =
+                                get_pixel_info(x, y, prev_pixel, frame_number - 1);
+
+                            if ch == prev_ch {
+                                #[cfg(feature = "truecolor")]
+                                {
+                                    if color == prev_color {
+                                        is_redundant = true;
+                                    }
+                                }
+                                #[cfg(all(not(feature = "truecolor"), feature = "color"))]
+                                {
+                                    let get_16_col = |c: Rgb<u8>| {
+                                        let r = if c[0] > 127 { 1 } else { 0 };
+                                        let g = if c[1] > 127 { 2 } else { 0 };
+                                        let b = if c[2] > 127 { 4 } else { 0 };
+                                        let i = if c[0] > 200 || c[1] > 200 || c[2] > 200 {
+                                            60
+                                        } else {
+                                            0
+                                        };
+                                        30 + r + g + b + i
+                                    };
+                                    if get_16_col(color) == get_16_col(prev_color) {
+                                        is_redundant = true;
+                                    }
+                                }
+                                #[cfg(not(feature = "color"))]
+                                {
+                                    is_redundant = true;
+                                }
+                            }
                         }
 
-                        #[cfg(not(feature = "color"))]
-                        {
-                            write!(output_buffer, "{}", ch).unwrap();
-                        }
+                        if is_redundant {
+                            skip_count += 1;
+                        } else {
+                            if skip_count > 0 {
+                                write!(output_buffer, "{ESCAPE}[{skip_count}C").unwrap();
+                                skip_count = 0;
+                            }
 
-                        #[cfg(all(not(feature = "truecolor"), feature = "color"))]
-                        {
-                            let color = maximize(*pixel);
-                            // map to closest 16 color palette color
-                            let r = if color[0] > 127 { 1 } else { 0 };
-                            let g = if color[1] > 127 { 2 } else { 0 };
-                            let b = if color[2] > 127 { 4 } else { 0 };
-                            let intensity = if color[0] > 200 || color[1] > 200 || color[2] > 200 {
-                                60
-                            } else {
-                                0
-                            };
-                            write!(
-                                output_buffer,
-                                "{ESCAPE}[{}m{ch}",
-                                30 + r + g + b + intensity
-                            )
-                            .unwrap();
+                            #[cfg(feature = "truecolor")]
+                            {
+                                write!(
+                                    output_buffer,
+                                    "{ESCAPE}[38;2;{};{};{}m{ch}",
+                                    color[0], color[1], color[2]
+                                )
+                                .unwrap();
+                            }
+
+                            #[cfg(not(feature = "color"))]
+                            {
+                                write!(output_buffer, "{}", ch).unwrap();
+                            }
+
+                            #[cfg(all(not(feature = "truecolor"), feature = "color"))]
+                            {
+                                // map to closest 16 color palette color
+                                let r = if color[0] > 127 { 1 } else { 0 };
+                                let g = if color[1] > 127 { 2 } else { 0 };
+                                let b = if color[2] > 127 { 4 } else { 0 };
+                                let intensity =
+                                    if color[0] > 200 || color[1] > 200 || color[2] > 200 {
+                                        60
+                                    } else {
+                                        0
+                                    };
+                                write!(
+                                    output_buffer,
+                                    "{ESCAPE}[{}m{ch}",
+                                    30 + r + g + b + intensity
+                                )
+                                .unwrap();
+                            }
                         }
                     }
                     #[cfg(all(not(feature = "truecolor"), feature = "color"))]
                     {
                         // reset color
-                        //output_buffer.push_str(format!("{ESCAPE}[0m"));
                         write!(output_buffer, "{ESCAPE}[0m").unwrap();
                     }
                     output_buffer.push('\n');
@@ -364,6 +428,7 @@ pub fn image(
                 }
 
                 *output_frame_slot = output_buffer;
+                output_frame_slot.shrink_to_fit();
             });
         }
     });
@@ -377,13 +442,22 @@ pub fn image(
             "Rendering took {:} seconds",
             end_time.duration_since(_start_time).as_secs_f32()
         );
+
+        #[cfg(debug_assertions)]
+        {
+            // print total size of output_frames
+            let total_size = output_frames
+                .iter()
+                .map(std::string::String::len)
+                .sum::<usize>();
+            eprintln!("Total size of output_frames: {total_size} bytes");
+        }
     }
 
     let stdout = io::stdout();
     let mut stdout_handle = io::BufWriter::new(stdout);
 
     stdout_handle.write_all(output_frames[0].as_bytes())?;
-    //std::hint::black_box(output_frames[0].as_bytes());
 
     if output_frames.len() == 1 {
         stdout_handle.flush()?;
@@ -392,7 +466,6 @@ pub fn image(
             for (idx, output_frame) in output_frames.iter().enumerate() {
                 stdout_handle.flush()?;
                 stdout_handle.write_all(output_frame.as_bytes())?;
-                //std::hint::black_box(output_frame);
                 prefetch_read_data::<_, 2>(
                     output_frames[if idx + 1 < output_frames.len() {
                         idx + 1
