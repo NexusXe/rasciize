@@ -15,6 +15,7 @@
 #![allow(clippy::used_underscore_items)]
 #![allow(clippy::inline_always)]
 #![allow(clippy::used_underscore_binding)]
+#![allow(clippy::similar_names)]
 
 use ab_glyph::Font;
 use image::{AnimationDecoder, DynamicImage};

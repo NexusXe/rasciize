@@ -1,10 +1,12 @@
 use std::arch::x86_64::*;
+use std::ptr::read_unaligned;
+use std::ptr::write_unaligned;
 
 use image::DynamicImage;
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 
 use std::mem;
-use std::simd::prelude::*;
+use std::simd::{StdFloat, prelude::*};
 
 const LANCZOS_RADIUS: f32 = 3.0;
 //const ROUNDING_MODE: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
@@ -150,7 +152,7 @@ impl PlanarBuffer {
             }
         }
 
-        if is_x86_feature_detected!("avx512vbmi") {
+        if is_x86_feature_detected!("avx512vbmi") && is_x86_feature_detected!("avx512bw") {
             unsafe {
                 let v0 = __m512i::from(v0);
                 let v1 = __m512i::from(v1);
@@ -206,9 +208,9 @@ impl PlanarBuffer {
 
                 let (v0, v1, v2) = Self::interleave_rgb(r_batch, g_batch, b_batch);
 
-                std::ptr::write_unaligned(output_ptr.add(pix * 3).cast(), v0);
-                std::ptr::write_unaligned(output_ptr.add(pix * 3 + 64).cast(), v1);
-                std::ptr::write_unaligned(output_ptr.add(pix * 3 + 128).cast(), v2);
+                write_unaligned(output_ptr.add(pix * 3).cast(), v0);
+                write_unaligned(output_ptr.add(pix * 3 + 64).cast(), v1);
+                write_unaligned(output_ptr.add(pix * 3 + 128).cast(), v2);
 
                 pix += 64;
             }
@@ -287,7 +289,7 @@ impl PlanarBuffer {
             }
         }
 
-        if is_x86_feature_detected!("avx512vbmi") {
+        if is_x86_feature_detected!("avx512vbmi") && is_x86_feature_detected!("avx512bw") {
             unsafe {
                 let m = _cvtu64_mask64(mask_val);
                 let res_low = _mm512_permutex2var_epi8(
@@ -361,6 +363,33 @@ impl PlanarBuffer {
         let v2 = Self::interleave(r, g, b, &idx2);
 
         (v0, v1, v2)
+    }
+
+    #[inline(always)]
+    pub unsafe fn simd_i32gather_ps<const SCALE: i32>(offsets: i32x16, base: *const f32) -> f32x16 {
+        // SCALE must be 1, 2, 4, or 8 per x86 gather rules
+        //debug_assert!(matches!(SCALE, 1 | 2 | 4 | 8));
+        const {
+            assert!(
+                !(SCALE != 1 && SCALE != 2 && SCALE != 4 && SCALE != 8),
+                "SCALE must be 1, 2, 4, or 8"
+            );
+        }
+
+        let mut output = [0.0f32; 16];
+
+        for (offset, out_f) in offsets.as_array().iter().zip(output.iter_mut()) {
+            // Compute byte offset exactly like the intrinsic
+            let byte_offset = *offset as isize * SCALE as isize;
+
+            // Convert base pointer to byte pointer
+            let addr = unsafe { base.byte_offset(byte_offset) };
+
+            // Unchecked load — identical UB semantics to AVX-512 gather
+            *out_f = unsafe { read_unaligned(addr) };
+        }
+
+        f32x16::from_array(output)
     }
 }
 
@@ -500,7 +529,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     let height = ((src.len() as u32) / src_width) as usize;
 
     unsafe {
-        let src_limit = _mm512_set1_epi32((src_width.saturating_sub(1)).cast_signed());
+        let src_limit = i32x16::splat((src_width.saturating_sub(1)).cast_signed());
 
         for y in 0..height {
             let src_row = src.as_ptr().add(y * src_width as usize);
@@ -516,80 +545,147 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 };
 
                 // Load base starting indices for this block of 16 pixels
-                let mut v_indices = _mm512_loadu_si512(indices_store.as_ptr().add(b * 16).cast());
+                let mut v_indices: i32x16 =
+                    read_unaligned(indices_store.as_ptr().add(b * 16).cast());
 
                 // Unrolling factor of 4 to hide FMA latency (Zen 5 FMA latency ~4 cycles)
-                let mut v_acc0 = mem::zeroed();
-                let mut v_acc1 = mem::zeroed();
-                let mut v_acc2 = mem::zeroed();
-                let mut v_acc3 = mem::zeroed();
+                let mut v_acc0: f32x16 = mem::zeroed();
+                let mut v_acc1: f32x16 = mem::zeroed();
+                let mut v_acc2: f32x16 = mem::zeroed();
+                let mut v_acc3: f32x16 = mem::zeroed();
 
                 let mut t = 0;
-                let v_one = _mm512_set1_epi32(1);
-                let v_two = _mm512_set1_epi32(2);
-                let v_three = _mm512_set1_epi32(3);
-                let v_four = _mm512_set1_epi32(4);
+                let v_one = i32x16::splat(1);
+                let v_two = i32x16::splat(2);
+                let v_three = i32x16::splat(3);
+                let v_four = i32x16::splat(4);
 
-                // Main unrolled loop
-                while t + 4 <= max_taps {
-                    // Tap 0
-                    let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-                    let v_w0 = _mm512_loadu_ps(w_ptr0);
-                    // v_indices is already correct for t
-                    let v_idx0 = _mm512_min_epi32(v_indices, src_limit);
-                    let v_src0 = _mm512_i32gather_ps(v_idx0, src_row.cast(), 4);
-                    v_acc0 = _mm512_fmadd_ps(v_w0, v_src0, v_acc0);
+                if is_x86_feature_detected!("avx512f") && false {
+                    let mut v_indices = __m512i::from(v_indices);
+                    // Main unrolled loop
+                    while t + 4 <= max_taps {
+                        let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
+                        let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
+                        let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
+                        let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
 
-                    // Tap 1
-                    let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
-                    let v_w1 = _mm512_loadu_ps(w_ptr1);
-                    let v_idx1_raw = _mm512_add_epi32(v_indices, v_one);
-                    let v_idx1 = _mm512_min_epi32(v_idx1_raw, src_limit);
-                    let v_src1 = _mm512_i32gather_ps(v_idx1, src_row.cast(), 4);
-                    v_acc1 = _mm512_fmadd_ps(v_w1, v_src1, v_acc1);
+                        let src_limit = __m512i::from(src_limit);
+                        let v_one = __m512i::from(v_one);
+                        let v_two = __m512i::from(v_two);
+                        let v_three = __m512i::from(v_three);
+                        let v_four = __m512i::from(v_four);
+                        // Tap 0
+                        let v_w0 = _mm512_loadu_ps(w_ptr0);
+                        // v_indices is already correct for t
+                        let v_idx0 = _mm512_min_epi32(v_indices, src_limit);
+                        let v_src0 = _mm512_i32gather_ps(v_idx0, src_row.cast(), 4);
+                        v_acc0 = f32x16::from(_mm512_fmadd_ps(v_w0, v_src0, __m512::from(v_acc0)));
 
-                    // Tap 2
-                    let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
-                    let v_w2 = _mm512_loadu_ps(w_ptr2);
-                    let v_idx2_raw = _mm512_add_epi32(v_indices, v_two);
-                    let v_idx2 = _mm512_min_epi32(v_idx2_raw, src_limit);
-                    let v_src2 = _mm512_i32gather_ps(v_idx2, src_row.cast(), 4);
-                    v_acc2 = _mm512_fmadd_ps(v_w2, v_src2, v_acc2);
+                        // Tap 1
+                        let v_w1 = _mm512_loadu_ps(w_ptr1);
+                        let v_idx1_raw = _mm512_add_epi32(v_indices, v_one);
+                        let v_idx1 = _mm512_min_epi32(v_idx1_raw, src_limit);
+                        let v_src1 = _mm512_i32gather_ps(v_idx1, src_row.cast(), 4);
+                        v_acc1 = f32x16::from(_mm512_fmadd_ps(v_w1, v_src1, __m512::from(v_acc1)));
 
-                    // Tap 3
-                    let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
-                    let v_w3 = _mm512_loadu_ps(w_ptr3);
-                    let v_idx3_raw = _mm512_add_epi32(v_indices, v_three);
-                    let v_idx3 = _mm512_min_epi32(v_idx3_raw, src_limit);
-                    let v_src3 = _mm512_i32gather_ps(v_idx3, src_row.cast(), 4);
-                    v_acc3 = _mm512_fmadd_ps(v_w3, v_src3, v_acc3);
+                        // Tap 2
+                        let v_w2 = _mm512_loadu_ps(w_ptr2);
+                        let v_idx2_raw = _mm512_add_epi32(v_indices, v_two);
+                        let v_idx2 = _mm512_min_epi32(v_idx2_raw, src_limit);
+                        let v_src2 = _mm512_i32gather_ps(v_idx2, src_row.cast(), 4);
+                        v_acc2 = f32x16::from(_mm512_fmadd_ps(v_w2, v_src2, __m512::from(v_acc2)));
 
-                    t += 4;
-                    v_indices = _mm512_add_epi32(v_indices, v_four);
-                }
+                        // Tap 3
+                        let v_w3 = _mm512_loadu_ps(w_ptr3);
+                        let v_idx3_raw = _mm512_add_epi32(v_indices, v_three);
+                        let v_idx3 = _mm512_min_epi32(v_idx3_raw, src_limit);
+                        let v_src3 = _mm512_i32gather_ps(v_idx3, src_row.cast(), 4);
+                        v_acc3 = f32x16::from(_mm512_fmadd_ps(v_w3, v_src3, __m512::from(v_acc3)));
 
-                // Handle remaining taps
-                while t < max_taps {
-                    let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-                    let v_w = _mm512_loadu_ps(w_ptr);
+                        t += 4;
+                        v_indices = _mm512_add_epi32(v_indices, v_four);
+                    }
 
-                    let v_idx_clamped = _mm512_min_epi32(v_indices, src_limit);
-                    let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
+                    // Handle remaining taps
+                    while t < max_taps {
+                        let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
 
-                    // Use acc0 for remainder
-                    v_acc0 = _mm512_fmadd_ps(v_w, v_src, v_acc0);
+                        let v_w = _mm512_loadu_ps(w_ptr);
+                        let v_idx_clamped = _mm512_min_epi32(v_indices, __m512i::from(src_limit));
+                        let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
 
-                    t += 1;
-                    v_indices = _mm512_add_epi32(v_indices, v_one);
+                        // Use acc0 for remainder
+                        v_acc0 = f32x16::from(_mm512_fmadd_ps(v_w, v_src, __m512::from(v_acc0)));
+
+                        t += 1;
+                        v_indices = _mm512_add_epi32(v_indices, __m512i::from(v_one));
+                    }
+                } else {
+                    // Main unrolled loop
+                    while t + 4 <= max_taps {
+                        let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
+                        let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
+                        let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
+                        let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
+
+                        // Tap 0
+                        let v_w0: f32x16 = read_unaligned(w_ptr0.cast());
+                        // v_indices is already correct for t
+                        let v_idx0 = v_indices.min(src_limit);
+                        let v_src0 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx0, src_row);
+                        v_acc0 = v_w0.mul_add(v_src0, v_acc0);
+
+                        // Tap 1
+                        let v_w1: f32x16 = read_unaligned(w_ptr1.cast());
+                        let v_idx1_raw = v_indices + v_one;
+                        let v_idx1 = v_idx1_raw.min(src_limit);
+                        let v_src1 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx1, src_row);
+                        v_acc1 = v_w1.mul_add(v_src1, v_acc1);
+
+                        // Tap 2
+                        let v_w2: f32x16 = read_unaligned(w_ptr2.cast());
+                        let v_idx2_raw = v_indices + v_two;
+                        let v_idx2 = v_idx2_raw.min(src_limit);
+                        let v_src2 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx2, src_row);
+                        v_acc2 = v_w2.mul_add(v_src2, v_acc2);
+
+                        // Tap 3
+                        let v_w3: f32x16 = read_unaligned(w_ptr3.cast());
+                        let v_idx3_raw = v_indices + v_three;
+                        let v_idx3 = v_idx3_raw.min(src_limit);
+                        let v_src3 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx3, src_row);
+                        v_acc3 = v_w3.mul_add(v_src3, v_acc3);
+
+                        t += 4;
+                        v_indices += v_four;
+                    }
+
+                    // Handle remaining taps
+                    while t < max_taps {
+                        let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
+
+                        let v_w: f32x16 = read_unaligned(w_ptr.cast());
+                        let v_idx_clamped = v_indices.min(src_limit);
+                        let v_src = PlanarBuffer::simd_i32gather_ps::<4>(v_idx_clamped, src_row);
+
+                        // Use acc0 for remainder
+                        v_acc0 = v_w.mul_add(v_src, v_acc0);
+
+                        t += 1;
+                        v_indices += v_one;
+                    }
                 }
 
                 // Sum accumulators
-                let v_acc01 = _mm512_add_ps(v_acc0, v_acc1);
-                let v_acc23 = _mm512_add_ps(v_acc2, v_acc3);
-                let v_acc = _mm512_add_ps(v_acc01, v_acc23);
+                let v_acc01 = v_acc0 + v_acc1;
+                let v_acc23 = v_acc2 + v_acc3;
+                let v_acc = v_acc01 + v_acc23;
 
                 // Store results
-                _mm512_mask_storeu_ps(dst_row.add(b * 16).cast(), mask, v_acc);
+                v_acc.store_select_ptr(
+                    dst_row.add(b * 16).cast(),
+                    mask32x16::from_bitmask(u64::from(mask)),
+                );
             }
         }
     }
@@ -653,7 +749,7 @@ unsafe fn lanczos3_vertical_pass_avx512(
     // Process the image in chunks of 16 columns
     for x_chunk in (0..width).step_by(16) {
         let rem = width - x_chunk;
-        let mask = unsafe { _cvtu32_mask16((1u32 << rem.min(16)) - 1) };
+        let mask = ((1u32 << rem.min(16)) - 1) as u16;
 
         unsafe {
             for (y_dst, b) in v_bounds.iter().enumerate() {
@@ -832,7 +928,7 @@ mod tests {
                 for i in 0..4 {
                     let mut output_floats = [0.0f32; 16];
                     // TODO: verify this is correct
-                    std::ptr::write_unaligned(output_floats.as_mut_ptr().cast(), results[i]);
+                    write_unaligned(output_floats.as_mut_ptr().cast(), results[i]);
 
                     for j in 0..16 {
                         let expected = f32::from(input_bytes[i * 16 + j]);
