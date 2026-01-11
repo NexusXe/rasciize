@@ -678,6 +678,12 @@ unsafe fn lanczos3_vertical_pass_avx512(
                     }
                 }
 
+                #[cfg(not(test))]
+                #[allow(deprecated)]
+                {
+                    debug_assert_eq!(_MM_GET_FLUSH_ZERO_MODE(), _MM_FLUSH_ZERO_ON);
+                }
+
                 // Fallback loop for remainder and unsafe rows (edges)
                 while i < taps {
                     let weight = b.values[i];
