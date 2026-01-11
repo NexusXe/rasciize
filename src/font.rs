@@ -8,6 +8,90 @@ use std::{
 pub type FloatPrecision = f32;
 pub type IntensityMap<V> = BTreeMap<OrderedFloat<FloatPrecision>, V>;
 
+// source: https://9p.io/sources/plan9/sys/include/ctype.h
+#[allow(unused)]
+#[inline(always)]
+fn glyph_is_safe(input: u16) -> bool {
+// #define	isalpha(c)	(_ctype[(unsigned char)(c)]&(_U|_L))
+// #define	isupper(c)	(_ctype[(unsigned char)(c)]&_U)
+// #define	islower(c)	(_ctype[(unsigned char)(c)]&_L)
+// #define	isdigit(c)	(_ctype[(unsigned char)(c)]&_N)
+// #define	isxdigit(c)	(_ctype[(unsigned char)(c)]&_X)
+// #define	isspace(c)	(_ctype[(unsigned char)(c)]&_S)
+// #define	ispunct(c)	(_ctype[(unsigned char)(c)]&_P)
+// #define	isalnum(c)	(_ctype[(unsigned char)(c)]&(_U|_L|_N))
+// #define	isprint(c)	(_ctype[(unsigned char)(c)]&(_P|_U|_L|_N|_B))
+// #define	isgraph(c)	(_ctype[(unsigned char)(c)]&(_P|_U|_L|_N))
+// #define	iscntrl(c)	(_ctype[(unsigned char)(c)]&_C)
+// #define	isascii(c)	((unsigned char)(c)<=0177)
+// #define	_toupper(c)	((c)-'a'+'A')
+// #define	_tolower(c)	((c)-'A'+'a')
+// #define	toascii(c)	((c)&0177)
+    const U: u16 = 0x01;
+    const L: u16 = 0x02;
+    const N: u16 = 0x04;
+    const S: u16 = 0x010;
+    const P: u16 = 0x020;
+    const Z: u16 = 0x040;
+    const C: u16 = 0x080;
+    const B: u16 = 0x0100;
+    const X: u16 = 0x0200;
+
+    fn is_alpha(input: u16) -> bool {
+        (input & (U | L)) != 0
+    }
+
+    fn is_upper(input: u16) -> bool {
+        (input & U) != 0
+    }
+
+    fn is_lower(input: u16) -> bool {
+        (input & L) != 0
+    }
+
+    fn is_digit(input: u16) -> bool {
+        (input & N) != 0
+    }
+
+    fn is_xdigit(input: u16) -> bool {
+        (input & X) != 0
+    }
+
+    fn is_space(input: u16) -> bool {
+        (input & S) != 0
+    }
+
+    fn is_punct(input: u16) -> bool {
+        (input & P) != 0
+    }
+
+    fn is_alnum(input: u16) -> bool {
+        (input & (U | L | N)) != 0
+    }
+
+    fn is_print(input: u16) -> bool {
+        (input & (P | U | L | N | B)) != 0
+    }
+
+    fn is_graph(input: u16) -> bool {
+        (input & (P | U | L | N)) != 0
+    }
+
+    fn is_cntrl(input: u16) -> bool {
+        (input & C) != 0
+    }
+
+    fn is_ascii(input: u16) -> bool {
+        input <= 0x7F
+    }
+
+    fn to_ascii(input: u16) -> u16 {
+        input & 0x7F
+    }
+
+    (is_print(input)) && !is_cntrl(input)
+}
+
 #[inline]
 pub fn get_coverage_array(
     font: &FontRef,
@@ -37,7 +121,7 @@ pub fn get_coverage_array(
 }
 
 #[inline]
-pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Option<FloatPrecision> {
+pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId, glyph_char: char) -> Option<FloatPrecision> {
     let outlined_glyph: OutlinedGlyph =
         font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))?;
     let bounds = outlined_glyph.px_bounds();
@@ -57,7 +141,7 @@ pub fn get_intensity(font: &FontRef, font_size: f32, glyph_id: GlyphId) -> Optio
         if unsafe {
             fsub_fast(bounds.width(), standard_glyph_width_wide).abs() > font_size.sqrt()
                 && (fsub_fast(bounds.width(), standard_glyph_width_narrow).abs() > font_size.sqrt())
-        } {
+        } && !glyph_is_safe(glyph_char as u16) {
             return None;
         }
     }
@@ -124,7 +208,7 @@ pub fn prepare_font<const LUT_FONT_SIZE: u16>(
             continue;
         }
 
-        if let Some(mut intensity) = get_intensity(&font, f32::from(LUT_FONT_SIZE), id) {
+        if let Some(mut intensity) = get_intensity(&font, f32::from(LUT_FONT_SIZE), id, character) {
             while intensity_lookup
                 .try_insert(OrderedFloat(intensity), character)
                 .is_err()
