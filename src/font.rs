@@ -114,9 +114,8 @@ pub fn prepare_font<const LUT_FONT_SIZE: u16>(
     let font = FontRef::try_from_slice(font_bytes)?;
 
     let mut intensity_lookup: IntensityMap<char> = IntensityMap::new();
-    // manually insert space character with intensity 0.0
+    // manually insert space and full block characters since they get skipped over by width checks and might not get the correct intensity otherwise
     intensity_lookup.insert(OrderedFloat(0.0), ' ');
-    // manually insert full block character with intensity 1.0
     intensity_lookup.insert(OrderedFloat(1.0), '█');
 
     for (id, character) in font.codepoint_ids() {

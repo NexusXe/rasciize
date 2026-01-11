@@ -3,6 +3,9 @@ use std::arch::x86_64::*;
 use image::DynamicImage;
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 
+use std::mem;
+use std::simd::prelude::*;
+
 const LANCZOS_RADIUS: f32 = 3.0;
 //const ROUNDING_MODE: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
 
@@ -10,9 +13,9 @@ const LANCZOS_RADIUS: f32 = 3.0;
 struct PlanarBuffer {
     width: u32,
     height: u32,
-    red: Vec<__m512>,   // Contiguous Reds
-    green: Vec<__m512>, // Contiguous Greens
-    blue: Vec<__m512>,  // Contiguous Blues
+    red: Vec<f32x16>,   // Contiguous Reds
+    green: Vec<f32x16>, // Contiguous Greens
+    blue: Vec<f32x16>,  // Contiguous Blues
 }
 
 impl PlanarBuffer {
@@ -23,9 +26,9 @@ impl PlanarBuffer {
         Self {
             width,
             height,
-            red: vec![unsafe { _mm512_setzero_ps() }; size_in_vectors],
-            green: vec![unsafe { _mm512_setzero_ps() }; size_in_vectors],
-            blue: vec![unsafe { _mm512_setzero_ps() }; size_in_vectors],
+            red: vec![unsafe { mem::zeroed() }; size_in_vectors],
+            green: vec![unsafe { mem::zeroed() }; size_in_vectors],
+            blue: vec![unsafe { mem::zeroed() }; size_in_vectors],
         }
     }
 
@@ -36,9 +39,9 @@ impl PlanarBuffer {
         let pixel_count = (width * height) as usize;
 
         let vec_capacity = pixel_count.div_ceil(16);
-        let mut all_reds: Vec<__m512> = Vec::with_capacity(vec_capacity);
-        let mut all_greens: Vec<__m512> = Vec::with_capacity(vec_capacity);
-        let mut all_blues: Vec<__m512> = Vec::with_capacity(vec_capacity);
+        let mut all_reds = Vec::with_capacity(vec_capacity);
+        let mut all_greens = Vec::with_capacity(vec_capacity);
+        let mut all_blues = Vec::with_capacity(vec_capacity);
 
         let pixels = frame.as_flat_samples().samples;
 
@@ -67,53 +70,44 @@ impl PlanarBuffer {
             }
         }
 
-        unsafe {
-            let mut chunks = pixels.chunks_exact(192);
-            for chunk in &mut chunks {
-                let v0 = _mm512_loadu_si512(chunk.as_ptr().cast());
-                let v1 = _mm512_loadu_si512(chunk.as_ptr().add(64).cast());
-                let v2 = _mm512_loadu_si512(chunk.as_ptr().add(128).cast());
+        let mut chunks = pixels.chunks_exact(192);
+        for chunk in &mut chunks {
+            let v0: u8x64 = u8x64::from_slice(chunk);
+            let v1: u8x64 = u8x64::from_slice(&chunk[64..]);
+            let v2: u8x64 = u8x64::from_slice(&chunk[128..]);
 
-                // De-interleave using VPERMI2B (VBMI)
-                // R0..31 from V0/V1, R32..63 from V1/V2
-                // Combine into single ZMM of R bytes (actually R is 64 bytes total)
-                // Wait, per_m2var_epi8 takes (low, idx, high).
-                // If idx > 63, it pulls from high.
+            let r_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 0);
+            let g_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 1);
+            let b_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 2);
 
-                // Let's refine: We need 64 bytes of R.
-                // V0 has R0..R21. V1 has R22..R42. V2 has R43..R63.
-                let r_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 0);
-                let g_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 1);
-                let b_bytes = Self::_mm512_permutex3var_epi8(v0, v1, v2, 2);
+            all_reds.extend_from_slice(&_mm512_cvtepu8_ps(r_bytes));
+            all_greens.extend_from_slice(&_mm512_cvtepu8_ps(g_bytes));
+            all_blues.extend_from_slice(&_mm512_cvtepu8_ps(b_bytes));
+        }
 
-                all_reds.extend_from_slice(&_mm512_cvtepu8_ps(r_bytes));
-                all_greens.extend_from_slice(&_mm512_cvtepu8_ps(g_bytes));
-                all_blues.extend_from_slice(&_mm512_cvtepu8_ps(b_bytes));
+        // Remainder
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            // Scalar fallback for the very last few pixels is fine
+            let mut reds = [0u8; 64];
+            let mut greens = [0u8; 64];
+            let mut blues = [0u8; 64];
+            let mut count = 0;
+            for p in remainder.chunks_exact(3) {
+                reds[count] = p[0];
+                greens[count] = p[1];
+                blues[count] = p[2];
+                count += 1;
             }
+            if count > 0 {
+                let r_batch = _mm512_cvtepu8_ps(u8x64::from_slice(&reds));
+                let g_batch = _mm512_cvtepu8_ps(u8x64::from_slice(&greens));
+                let b_batch = _mm512_cvtepu8_ps(u8x64::from_slice(&blues));
+                let needed = count.div_ceil(16);
 
-            // Remainder
-            let remainder = chunks.remainder();
-            if !remainder.is_empty() {
-                // Scalar fallback for the very last few pixels is fine
-                let mut reds = [0u8; 64];
-                let mut greens = [0u8; 64];
-                let mut blues = [0u8; 64];
-                let mut count = 0;
-                for p in remainder.chunks_exact(3) {
-                    reds[count] = p[0];
-                    greens[count] = p[1];
-                    blues[count] = p[2];
-                    count += 1;
-                }
-                if count > 0 {
-                    let r_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(reds.as_ptr().cast()));
-                    let g_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(greens.as_ptr().cast()));
-                    let b_batch = _mm512_cvtepu8_ps(_mm512_loadu_si512(blues.as_ptr().cast()));
-                    let needed = count.div_ceil(16);
-                    all_reds.extend_from_slice(&r_batch[..needed]);
-                    all_greens.extend_from_slice(&g_batch[..needed]);
-                    all_blues.extend_from_slice(&b_batch[..needed]);
-                }
+                all_reds.extend_from_slice(&r_batch[..needed]);
+                all_greens.extend_from_slice(&g_batch[..needed]);
+                all_blues.extend_from_slice(&b_batch[..needed]);
             }
         }
 
@@ -127,7 +121,7 @@ impl PlanarBuffer {
     }
 
     #[inline(always)]
-    fn _mm512_permutex3var_epi8(v0: __m512i, v1: __m512i, v2: __m512i, channel: u8) -> __m512i {
+    fn _mm512_permutex3var_epi8(v0: u8x64, v1: u8x64, v2: u8x64, channel: u8) -> u8x64 {
         let mut idx_low = [0u8; 64];
         let mut idx_high = [0u8; 64];
         let mut mask_val = 0u64;
@@ -142,13 +136,39 @@ impl PlanarBuffer {
             }
         }
 
-        unsafe {
-            let m = _cvtu64_mask64(mask_val);
-            let res_low =
-                _mm512_permutex2var_epi8(v0, _mm512_loadu_si512(idx_low.as_ptr().cast()), v1);
-            let res_high =
-                _mm512_permutex2var_epi8(v1, _mm512_loadu_si512(idx_high.as_ptr().cast()), v2);
-            _mm512_mask_blend_epi8(m, res_low, res_high)
+        if is_x86_feature_detected!("avx512vbmi") {
+            unsafe {
+                let v0 = __m512i::from(v0);
+                let v1 = __m512i::from(v1);
+                let v2 = __m512i::from(v2);
+                let m = _cvtu64_mask64(mask_val);
+                let res_low =
+                    _mm512_permutex2var_epi8(v0, _mm512_loadu_si512(idx_low.as_ptr().cast()), v1);
+                let res_high =
+                    _mm512_permutex2var_epi8(v1, _mm512_loadu_si512(idx_high.as_ptr().cast()), v2);
+                u8x64::from(_mm512_mask_blend_epi8(m, res_low, res_high))
+            }
+        } else {
+            #[inline]
+            pub fn permutex2var_epi8(a: u8x64, index: u8x64, b: u8x64) -> u8x64 {
+                // low 6 bits = byte index
+                let idx = index & u8x64::splat(0x3F);
+
+                // swizzle both sources
+                let from_a = a.swizzle_dyn(idx);
+                let from_b = b.swizzle_dyn(idx);
+
+                // bit 6 selects source
+                let select_b: mask8x64 = (index & u8x64::splat(0x40)).simd_ne(u8x64::splat(0));
+                select_b.select(from_b, from_a)
+            }
+
+            let m: mask8x64 = mask8x64::from_bitmask(mask_val);
+            let low_vector: u8x64 = u8x64::from_slice(&idx_low);
+            let high_vector: u8x64 = u8x64::from_slice(&idx_high);
+            let res_low = permutex2var_epi8(v0, low_vector, v1);
+            let res_high = permutex2var_epi8(v1, high_vector, v2);
+            m.select(res_high, res_low)
         }
     }
 
@@ -317,15 +337,27 @@ impl PlanarBuffer {
 // this intrinsic doesn't exist, so i'm implementing it myself
 // converts 64 bytes to 64 single-precision floats
 #[inline(always)]
-fn _mm512_cvtepu8_ps(input: __m512i) -> [__m512; 4] {
-    unsafe {
-        [
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(input))),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 1))),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 2))),
-            _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 3))),
-        ]
-    }
+fn _mm512_cvtepu8_ps(input: u8x64) -> [f32x16; 4] {
+    let output: f32x64 = if is_x86_feature_detected!("avx512f") {
+        unsafe {
+            let input = __m512i::from(input);
+            mem::transmute([
+                _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(input))),
+                _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 1))),
+                _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 2))),
+                _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 3))),
+            ])
+        }
+    } else {
+        input.cast()
+    };
+    let output = output.as_array();
+    [
+        f32x16::from_slice(&output[0..16]),
+        f32x16::from_slice(&output[16..32]),
+        f32x16::from_slice(&output[32..48]),
+        f32x16::from_slice(&output[48..64]),
+    ]
 }
 
 #[derive(Debug, Clone)]
@@ -456,10 +488,10 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 let mut v_indices = _mm512_loadu_si512(indices_store.as_ptr().add(b * 16).cast());
 
                 // Unrolling factor of 4 to hide FMA latency (Zen 5 FMA latency ~4 cycles)
-                let mut v_acc0 = _mm512_setzero_ps();
-                let mut v_acc1 = _mm512_setzero_ps();
-                let mut v_acc2 = _mm512_setzero_ps();
-                let mut v_acc3 = _mm512_setzero_ps();
+                let mut v_acc0 = mem::zeroed();
+                let mut v_acc1 = mem::zeroed();
+                let mut v_acc2 = mem::zeroed();
+                let mut v_acc3 = mem::zeroed();
 
                 let mut t = 0;
                 let v_one = _mm512_set1_epi32(1);
@@ -532,15 +564,15 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     }
 }
 
-/// Helper to cast &[__m512] -> &[f32]
+/// Helper to cast &[f32x16] -> &[f32]
 #[inline(always)]
-const fn as_f32(v: &[__m512]) -> &[f32] {
+const fn as_f32(v: &[f32x16]) -> &[f32] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<f32>(), v.len() * 16) }
 }
 
-/// Helper to cast &mut [__m512] -> &mut [f32]
+/// Helper to cast &mut [f32x16] -> &mut [f32]
 #[inline(always)]
-const fn as_f32_mut(v: &mut [__m512]) -> &mut [f32] {
+const fn as_f32_mut(v: &mut [f32x16]) -> &mut [f32] {
     unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<f32>(), v.len() * 16) }
 }
 
@@ -594,10 +626,10 @@ unsafe fn lanczos3_vertical_pass_avx512(
 
         unsafe {
             for (y_dst, b) in v_bounds.iter().enumerate() {
-                let mut acc0 = _mm512_setzero_ps();
-                let mut acc1 = _mm512_setzero_ps();
-                let mut acc2 = _mm512_setzero_ps();
-                let mut acc3 = _mm512_setzero_ps();
+                let mut acc0 = mem::zeroed();
+                let mut acc1 = mem::zeroed();
+                let mut acc2 = mem::zeroed();
+                let mut acc3 = mem::zeroed();
 
                 let taps = b.values.len();
                 let mut i = 0;
@@ -643,11 +675,6 @@ unsafe fn lanczos3_vertical_pass_avx512(
                         acc3 = _mm512_fmadd_ps(p3, w3, acc3);
 
                         i += 4;
-                    }
-
-                    #[allow(deprecated)]
-                    {
-                        debug_assert_eq!(_MM_GET_FLUSH_ZERO_MODE(), _MM_FLUSH_ZERO_ON);
                     }
                 }
 
@@ -762,12 +789,13 @@ mod tests {
             unsafe {
                 // clippy false positive, loadu doesn't need alignment
                 #[allow(clippy::cast_ptr_alignment)]
-                let input_vec = _mm512_loadu_si512(input_bytes.as_ptr().cast::<__m512i>());
+                let input_vec = u8x64::from_slice(&input_bytes);
                 let results = _mm512_cvtepu8_ps(input_vec);
 
                 for i in 0..4 {
                     let mut output_floats = [0.0f32; 16];
-                    _mm512_storeu_ps(output_floats.as_mut_ptr(), results[i]);
+                    // TODO: verify this is correct
+                    std::ptr::write_unaligned(output_floats.as_mut_ptr().cast(), results[i]);
 
                     for j in 0..16 {
                         let expected = f32::from(input_bytes[i * 16 + j]);

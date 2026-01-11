@@ -289,25 +289,52 @@ pub fn image(
 
                         if spicy {
                             // slightly randomize
-                            let seed_data: u64 = (u64::from(sc_r)
-                                | u64::from(sc_g) << 8
-                                | u64::from(sc_b) << 16
-                                | u64::from(y) << 24
-                                | u64::from(x) << 32
-                                | (f_num as u64) << 40)
-                                ^ (u64::from(lum.to_bits()).rotate_left(40));
+                            let seed_data: u64 = u64::from(x)
+                                ^ u64::from(y).rotate_left(16)
+                                ^ (f_num as u64).rotate_left(32)
+                                ^ u64::from(sc_r)
+                                ^ u64::from(sc_g).rotate_left(8)
+                                ^ u64::from(sc_b).rotate_left(24)
+                                ^ u64::from(lum.to_bits()).rotate_left(48); // a little bit of nonlinearity from the sqrt function in luminance()
 
                             let random_value: f32 = {
-                                #[cfg(target_feature = "sse4.2")]
-                                unsafe {
-                                    let hash =
-                                        std::arch::x86_64::_mm_crc32_u64(0x045d_9f3b, seed_data);
-                                    let bits = ((hash as u32) & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
-                                    let res = f32::from_bits(bits);
-                                    fsub_fast(res, 1.5)
+                                const DOMAIN_CONST: u32 = 0x045d_9f3b;
+
+                                #[inline(always)]
+                                fn murmur3_64to32_seeded<const SEED: u32>(data: u64) -> u32 {
+                                    let mut h: u32 = (data as u32) ^ (data >> 32) as u32;
+
+                                    h ^= SEED;
+
+                                    h ^= h >> 16;
+                                    h *= 0x7feb_352d;
+                                    h ^= h >> 15;
+                                    h *= 0x846c_a68b;
+                                    h ^= h >> 16;
+
+                                    h
                                 }
-                                #[cfg(not(target_feature = "sse4.2"))]
-                                0.0
+
+                                let hash = {
+                                    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                                    if is_x86_feature_detected!("sse4.2") {
+                                        unsafe {
+                                            std::arch::x86_64::_mm_crc32_u64(
+                                                u64::from(DOMAIN_CONST),
+                                                seed_data,
+                                            ) as u32
+                                        }
+                                    } else {
+                                        murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
+                                    }
+
+                                    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                                    murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
+                                };
+
+                                let bits = (hash & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
+                                let res = f32::from_bits(bits);
+                                unsafe { fsub_fast(res, 1.5) }
                             };
 
                             lum_scaled = unsafe {
