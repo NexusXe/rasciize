@@ -1,5 +1,5 @@
 use crate::*;
-use ab_glyph::FontRef;
+use ab_glyph::{Font, FontRef};
 use image::{ImageReader, Rgb};
 use std::arch::x86_64::*;
 use std::intrinsics::prefetch_read_data;

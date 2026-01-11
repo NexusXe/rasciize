@@ -17,7 +17,6 @@
 #![allow(clippy::used_underscore_binding)]
 #![allow(clippy::similar_names)]
 
-use ab_glyph::Font;
 use image::{AnimationDecoder, DynamicImage};
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 

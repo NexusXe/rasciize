@@ -560,7 +560,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 let v_three = i32x16::splat(3);
                 let v_four = i32x16::splat(4);
 
-                if is_x86_feature_detected!("avx512f") && false {
+                if is_x86_feature_detected!("avx512f") {
                     let mut v_indices = __m512i::from(v_indices);
                     // Main unrolled loop
                     while t + 4 <= max_taps {
@@ -631,28 +631,28 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                         // Tap 0
                         let v_w0: f32x16 = read_unaligned(w_ptr0.cast());
                         // v_indices is already correct for t
-                        let v_idx0 = v_indices.min(src_limit);
+                        let v_idx0 = v_indices.simd_min(src_limit);
                         let v_src0 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx0, src_row);
                         v_acc0 = v_w0.mul_add(v_src0, v_acc0);
 
                         // Tap 1
                         let v_w1: f32x16 = read_unaligned(w_ptr1.cast());
                         let v_idx1_raw = v_indices + v_one;
-                        let v_idx1 = v_idx1_raw.min(src_limit);
+                        let v_idx1 = v_idx1_raw.simd_min(src_limit);
                         let v_src1 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx1, src_row);
                         v_acc1 = v_w1.mul_add(v_src1, v_acc1);
 
                         // Tap 2
                         let v_w2: f32x16 = read_unaligned(w_ptr2.cast());
                         let v_idx2_raw = v_indices + v_two;
-                        let v_idx2 = v_idx2_raw.min(src_limit);
+                        let v_idx2 = v_idx2_raw.simd_min(src_limit);
                         let v_src2 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx2, src_row);
                         v_acc2 = v_w2.mul_add(v_src2, v_acc2);
 
                         // Tap 3
                         let v_w3: f32x16 = read_unaligned(w_ptr3.cast());
                         let v_idx3_raw = v_indices + v_three;
-                        let v_idx3 = v_idx3_raw.min(src_limit);
+                        let v_idx3 = v_idx3_raw.simd_min(src_limit);
                         let v_src3 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx3, src_row);
                         v_acc3 = v_w3.mul_add(v_src3, v_acc3);
 
@@ -665,7 +665,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                         let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
 
                         let v_w: f32x16 = read_unaligned(w_ptr.cast());
-                        let v_idx_clamped = v_indices.min(src_limit);
+                        let v_idx_clamped = v_indices.simd_min(src_limit);
                         let v_src = PlanarBuffer::simd_i32gather_ps::<4>(v_idx_clamped, src_row);
 
                         // Use acc0 for remainder

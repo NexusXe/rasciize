@@ -15,8 +15,6 @@ fn test_mm512_cvtepu8_ps() {
 
     for input_bytes in test_cases {
         unsafe {
-            // clippy false positive, loadu doesn't need alignment
-            #[allow(clippy::cast_ptr_alignment)]
             let input_vec = u8x64::from_slice(&input_bytes);
             let results = _mm512_cvtepu8_ps(input_vec);
 
