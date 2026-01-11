@@ -121,6 +121,20 @@ impl PlanarBuffer {
     }
 
     #[inline(always)]
+    fn permutex2var_epi8(a: u8x64, index: u8x64, b: u8x64) -> u8x64 {
+        // low 6 bits = byte index
+        let idx = index & u8x64::splat(0x3F);
+
+        // swizzle both sources
+        let from_a = a.swizzle_dyn(idx);
+        let from_b = b.swizzle_dyn(idx);
+
+        // bit 6 selects source
+        let select_b: mask8x64 = (index & u8x64::splat(0x40)).simd_ne(u8x64::splat(0));
+        select_b.select(from_b, from_a)
+    }
+
+    #[inline(always)]
     fn _mm512_permutex3var_epi8(v0: u8x64, v1: u8x64, v2: u8x64, channel: u8) -> u8x64 {
         let mut idx_low = [0u8; 64];
         let mut idx_high = [0u8; 64];
@@ -149,25 +163,11 @@ impl PlanarBuffer {
                 u8x64::from(_mm512_mask_blend_epi8(m, res_low, res_high))
             }
         } else {
-            #[inline]
-            pub fn permutex2var_epi8(a: u8x64, index: u8x64, b: u8x64) -> u8x64 {
-                // low 6 bits = byte index
-                let idx = index & u8x64::splat(0x3F);
-
-                // swizzle both sources
-                let from_a = a.swizzle_dyn(idx);
-                let from_b = b.swizzle_dyn(idx);
-
-                // bit 6 selects source
-                let select_b: mask8x64 = (index & u8x64::splat(0x40)).simd_ne(u8x64::splat(0));
-                select_b.select(from_b, from_a)
-            }
-
             let m: mask8x64 = mask8x64::from_bitmask(mask_val);
             let low_vector: u8x64 = u8x64::from_slice(&idx_low);
             let high_vector: u8x64 = u8x64::from_slice(&idx_high);
-            let res_low = permutex2var_epi8(v0, low_vector, v1);
-            let res_high = permutex2var_epi8(v1, high_vector, v2);
+            let res_low = Self::permutex2var_epi8(v0, low_vector, v1);
+            let res_high = Self::permutex2var_epi8(v1, high_vector, v2);
             m.select(res_high, res_low)
         }
     }
@@ -186,29 +186,29 @@ impl PlanarBuffer {
             let mut pix = 0;
             while pix + 64 <= pixel_count {
                 let r_batch = Self::pack_floats_to_u8(
-                    *red_ptr.add(pix / 16),
-                    *red_ptr.add(pix / 16 + 1),
-                    *red_ptr.add(pix / 16 + 2),
-                    *red_ptr.add(pix / 16 + 3),
+                    f32x16::from(*red_ptr.add(pix / 16)),
+                    f32x16::from(*red_ptr.add(pix / 16 + 1)),
+                    f32x16::from(*red_ptr.add(pix / 16 + 2)),
+                    f32x16::from(*red_ptr.add(pix / 16 + 3)),
                 );
                 let g_batch = Self::pack_floats_to_u8(
-                    *green_ptr.add(pix / 16),
-                    *green_ptr.add(pix / 16 + 1),
-                    *green_ptr.add(pix / 16 + 2),
-                    *green_ptr.add(pix / 16 + 3),
+                    f32x16::from(*green_ptr.add(pix / 16)),
+                    f32x16::from(*green_ptr.add(pix / 16 + 1)),
+                    f32x16::from(*green_ptr.add(pix / 16 + 2)),
+                    f32x16::from(*green_ptr.add(pix / 16 + 3)),
                 );
                 let b_batch = Self::pack_floats_to_u8(
-                    *blue_ptr.add(pix / 16),
-                    *blue_ptr.add(pix / 16 + 1),
-                    *blue_ptr.add(pix / 16 + 2),
-                    *blue_ptr.add(pix / 16 + 3),
+                    f32x16::from(*blue_ptr.add(pix / 16)),
+                    f32x16::from(*blue_ptr.add(pix / 16 + 1)),
+                    f32x16::from(*blue_ptr.add(pix / 16 + 2)),
+                    f32x16::from(*blue_ptr.add(pix / 16 + 3)),
                 );
 
                 let (v0, v1, v2) = Self::interleave_rgb(r_batch, g_batch, b_batch);
 
-                _mm512_storeu_si512(output_ptr.add(pix * 3).cast(), v0);
-                _mm512_storeu_si512(output_ptr.add(pix * 3 + 64).cast(), v1);
-                _mm512_storeu_si512(output_ptr.add(pix * 3 + 128).cast(), v2);
+                std::ptr::write_unaligned(output_ptr.add(pix * 3).cast(), v0);
+                std::ptr::write_unaligned(output_ptr.add(pix * 3 + 64).cast(), v1);
+                std::ptr::write_unaligned(output_ptr.add(pix * 3 + 128).cast(), v2);
 
                 pix += 64;
             }
@@ -232,32 +232,90 @@ impl PlanarBuffer {
 
     // Helper: Pack 64 floats to 64 bytes with clamping
     #[inline(always)]
-    fn pack_floats_to_u8(v0: __m512, v1: __m512, v2: __m512, v3: __m512) -> __m512i {
-        unsafe {
-            // Round to nearest integer (cvteps_epi32)
-            let i0 = _mm512_cvttps_epi32(v0);
-            let i1 = _mm512_cvttps_epi32(v1);
-            let i2 = _mm512_cvttps_epi32(v2);
-            let i3 = _mm512_cvttps_epi32(v3);
+    fn pack_floats_to_u8(v0: f32x16, v1: f32x16, v2: f32x16, v3: f32x16) -> u8x64 {
+        if is_x86_feature_detected!("avx512f") {
+            unsafe {
+                // Round to nearest integer (cvteps_epi32)
+                let i0 = _mm512_cvttps_epi32(v0.into());
+                let i1 = _mm512_cvttps_epi32(v1.into());
+                let i2 = _mm512_cvttps_epi32(v2.into());
+                let i3 = _mm512_cvttps_epi32(v3.into());
 
-            // Pack with unsigned saturation to u8 (AVX-512F/BW/DQ)
-            let b0 = _mm512_cvtusepi32_epi8(i0); // 16 bytes in __m128i
-            let b1 = _mm512_cvtusepi32_epi8(i1);
-            let b2 = _mm512_cvtusepi32_epi8(i2);
-            let b3 = _mm512_cvtusepi32_epi8(i3);
+                // Pack with unsigned saturation to u8 (AVX-512F/BW/DQ)
+                let b0 = _mm512_cvtusepi32_epi8(i0); // 16 bytes in __m128i
+                let b1 = _mm512_cvtusepi32_epi8(i1);
+                let b2 = _mm512_cvtusepi32_epi8(i2);
+                let b3 = _mm512_cvtusepi32_epi8(i3);
 
-            // Combine 4 XMMs into one ZMM
-            _mm512_inserti32x4(
-                _mm512_inserti32x4(_mm512_inserti32x4(_mm512_castsi128_si512(b0), b1, 1), b2, 2),
-                b3,
-                3,
-            )
+                // Combine 4 XMMs into one ZMM
+                u8x64::from(_mm512_inserti32x4(
+                    _mm512_inserti32x4(
+                        _mm512_inserti32x4(_mm512_castsi128_si512(b0), b1, 1),
+                        b2,
+                        2,
+                    ),
+                    b3,
+                    3,
+                ))
+            }
+        } else {
+            // no built-in saturating cast, but luckily as-casting float to int saturates so that's what portable_simd cast() does
+            // relevant issue: https://github.com/rust-lang/portable-simd/issues/369
+            let b0: u8x16 = v0.cast();
+            let b1: u8x16 = v1.cast();
+            let b2: u8x16 = v2.cast();
+            let b3: u8x16 = v3.cast();
+
+            unsafe { mem::transmute::<[u8x16; 4], u8x64>([b0, b1, b2, b3]) }
+        }
+    }
+
+    // compiles into a disgusting straight-through of instructions. how
+    #[inline(always)]
+    fn interleave(r: u8x64, g: u8x64, b: u8x64, raw_idx: &[u8; 64]) -> u8x64 {
+        let mut idx_low = [0u8; 64];
+        let mut idx_high = [0u8; 64];
+        let mut mask_val = 0u64;
+
+        for (i, &src) in raw_idx.iter().enumerate() {
+            let src_val = u32::from(src);
+            if src_val < 128 {
+                idx_low[i] = src_val as u8;
+            } else {
+                idx_high[i] = (src_val - 64) as u8;
+                mask_val |= 1 << i;
+            }
+        }
+
+        if is_x86_feature_detected!("avx512vbmi") {
+            unsafe {
+                let m = _cvtu64_mask64(mask_val);
+                let res_low = _mm512_permutex2var_epi8(
+                    __m512i::from(r),
+                    _mm512_loadu_si512(idx_low.as_ptr().cast()),
+                    __m512i::from(g),
+                );
+                let res_high = _mm512_permutex2var_epi8(
+                    __m512i::from(g),
+                    _mm512_loadu_si512(idx_high.as_ptr().cast()),
+                    __m512i::from(b),
+                );
+
+                u8x64::from(_mm512_mask_blend_epi8(m, res_low, res_high))
+            }
+        } else {
+            let m: mask8x64 = mask8x64::from_bitmask(mask_val);
+            let low_vector: u8x64 = u8x64::from_slice(&idx_low);
+            let high_vector: u8x64 = u8x64::from_slice(&idx_high);
+            let res_low = Self::permutex2var_epi8(r, low_vector, g);
+            let res_high = Self::permutex2var_epi8(g, high_vector, b);
+            m.select(res_high, res_low)
         }
     }
 
     // Helper: Interleave planar R, G, B into packed RGB (VBMI)
     #[inline(always)]
-    fn interleave_rgb(r: __m512i, g: __m512i, b: __m512i) -> (__m512i, __m512i, __m512i) {
+    fn interleave_rgb(r: u8x64, g: u8x64, b: u8x64) -> (u8x64, u8x64, u8x64) {
         // Define indices for the 3 output registers
         let mut idx0 = [0u8; 64];
         let mut idx1 = [0u8; 64];
@@ -304,34 +362,6 @@ impl PlanarBuffer {
 
         (v0, v1, v2)
     }
-
-    // compiles into a disgusting straight-through of instructions. how
-    #[inline(always)]
-    fn interleave(r: __m512i, g: __m512i, b: __m512i, raw_idx: &[u8; 64]) -> __m512i {
-        let mut idx_low = [0u8; 64];
-        let mut idx_high = [0u8; 64];
-        let mut mask_val = 0u64;
-
-        for (i, &src) in raw_idx.iter().enumerate() {
-            let src_val = u32::from(src);
-            if src_val < 128 {
-                idx_low[i] = src_val as u8;
-            } else {
-                idx_high[i] = (src_val - 64) as u8;
-                mask_val |= 1 << i;
-            }
-        }
-
-        unsafe {
-            let m = _cvtu64_mask64(mask_val);
-            let res_low =
-                _mm512_permutex2var_epi8(r, _mm512_loadu_si512(idx_low.as_ptr().cast()), g);
-            let res_high =
-                _mm512_permutex2var_epi8(g, _mm512_loadu_si512(idx_high.as_ptr().cast()), b);
-
-            _mm512_mask_blend_epi8(m, res_low, res_high)
-        }
-    }
 }
 
 // this intrinsic doesn't exist, so i'm implementing it myself
@@ -341,7 +371,7 @@ fn _mm512_cvtepu8_ps(input: u8x64) -> [f32x16; 4] {
     let output: f32x64 = if is_x86_feature_detected!("avx512f") {
         unsafe {
             let input = __m512i::from(input);
-            mem::transmute([
+            mem::transmute::<[__m512; 4], f32x64>([
                 _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(input))),
                 _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 1))),
                 _mm512_cvtepu32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(input, 2))),
@@ -351,6 +381,7 @@ fn _mm512_cvtepu8_ps(input: u8x64) -> [f32x16; 4] {
     } else {
         input.cast()
     };
+
     let output = output.as_array();
     [
         f32x16::from_slice(&output[0..16]),
