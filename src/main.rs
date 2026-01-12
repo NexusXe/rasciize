@@ -30,11 +30,6 @@ mod output;
 use output::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if !is_x86_feature_detected!("avx512f") {
-        eprintln!("AVX512F not detected. Tough luck!");
-        std::process::exit(1337)
-    }
-
     let (font, intensity_lookup) = prepare_font::<LUT_FONT_SIZE>(FONT_TTF)?;
 
     // if the `--text` flag is provided, read from stdin and render the text
