@@ -273,6 +273,7 @@ pub fn image(
                 let mut output_buffer = String::with_capacity(
                     ((this_frame.width() + 10) * this_frame.height()) as usize,
                 );
+                output_buffer.push_str("\x1b[?2026h");
 
                 #[cfg(not(feature = "color"))]
                 {
@@ -464,6 +465,7 @@ pub fn image(
                 if total_frame_count > 1 {
                     output_buffer.push_str(format!("{ESCAPE}[{height}A").as_str()); // move up N lines
                 }
+                output_buffer.push_str("\x1b[?2026l");
 
                 *output_frame_slot = output_buffer;
                 output_frame_slot.shrink_to_fit();
@@ -493,7 +495,7 @@ pub fn image(
     }
 
     let stdout = io::stdout();
-    let mut stdout_handle = io::BufWriter::new(stdout);
+    let mut stdout_handle = io::BufWriter::with_capacity(output_frames[0].len(), stdout.lock());
 
     let mut looped = false;
     stdout_handle.write_all(output_frames[0].as_bytes())?;
