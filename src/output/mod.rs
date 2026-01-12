@@ -3,7 +3,7 @@ use ab_glyph::{Font, FontRef};
 use image::{ImageReader, Rgb};
 use std::arch::x86_64::*;
 use std::intrinsics::prefetch_read_data;
-use std::io::{self, Write};
+use std::io::{self, prelude::*};
 use std::thread::sleep;
 
 use std::time::{Duration, Instant};
