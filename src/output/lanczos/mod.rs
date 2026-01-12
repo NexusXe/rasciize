@@ -430,8 +430,9 @@ pub struct FilterBounds {
 pub type FilterBank = Vec<FilterBounds>;
 
 #[inline(always)]
+#[allow(unused)]
 fn sinc(x: f32) -> f32 {
-    if x == 0.0 {
+    if x == 0.0 || x.is_subnormal() {
         1.0
     } else {
         let pi_x = unsafe { fmul_fast(x, std::f32::consts::PI) };
@@ -440,10 +441,53 @@ fn sinc(x: f32) -> f32 {
 }
 
 #[inline(always)]
+#[allow(clippy::unreadable_literal)]
+pub fn sinc_approx(x: f32) -> f32 {
+    // Minimax coefficients optimized for [0, 1]
+    const C0: f32 = 0.999996;
+    const C1: f32 = -1.6448622;
+    const C2: f32 = 0.8114296;
+    const C3: f32 = -0.19018897;
+    const C4: f32 = 0.025642106;
+    const C5: f32 = -0.0021039767;
+    const C6: f32 = 8.781045e-05;
+
+    if x == 0.0 || x.is_subnormal() {
+        1.0
+    } else {
+        unsafe {
+            use std::intrinsics::{fadd_fast, fmul_fast};
+
+            // 1. Pre-calculate powers of u (u = x^2)
+            let u = fmul_fast(x, x);
+            let u2 = fmul_fast(u, u);
+            let u4 = fmul_fast(u2, u2);
+
+            // 2. Layer 1: Independent pairs (C_n + C_{n+1}*u)
+            // Equivalent to: C1 * u + C0
+            let pair_0_1 = fadd_fast(fmul_fast(C1, u), C0);
+            let pair_2_3 = fadd_fast(fmul_fast(C3, u), C2);
+            let pair_4_5 = fadd_fast(fmul_fast(C5, u), C4);
+
+            // 3. Layer 2: Combine pairs using u^2
+            // Equivalent to: pair_0_1 + pair_2_3 * u^2
+            let quad_0_3 = fadd_fast(pair_0_1, fmul_fast(pair_2_3, u2));
+
+            // Equivalent to: pair_4_5 + C6 * u^2
+            let quad_4_6 = fadd_fast(pair_4_5, fmul_fast(C6, u2));
+
+            // 4. Layer 3: Final Combination using u^4
+            // Equivalent to: quad_0_3 + quad_4_6 * u^4
+            fadd_fast(quad_0_3, fmul_fast(quad_4_6, u4))
+        }
+    }
+}
+
+#[inline(always)]
 fn lanczos3_kernel(x: f32) -> f32 {
     let x = x.abs();
     if x < LANCZOS_RADIUS {
-        unsafe { fmul_fast(sinc(x), sinc(fdiv_fast(x, LANCZOS_RADIUS))) }
+        unsafe { fmul_fast(sinc_approx(x), sinc_approx(fdiv_fast(x, LANCZOS_RADIUS))) }
     } else {
         0.0
     }
