@@ -753,10 +753,10 @@ unsafe fn lanczos3_vertical_pass_avx512(
 
         unsafe {
             for (y_dst, b) in v_bounds.iter().enumerate() {
-                let mut acc0 = mem::zeroed();
-                let mut acc1 = mem::zeroed();
-                let mut acc2 = mem::zeroed();
-                let mut acc3 = mem::zeroed();
+                let mut acc0: f32x16 = mem::zeroed();
+                let mut acc1: f32x16 = mem::zeroed();
+                let mut acc2: f32x16 = mem::zeroed();
+                let mut acc3: f32x16 = mem::zeroed();
 
                 let taps = b.values.len();
                 let mut i = 0;
@@ -769,37 +769,87 @@ unsafe fn lanczos3_vertical_pass_avx512(
                     while i + 4 <= taps {
                         let start_y = b.start_index + i;
 
-                        // Tap 0
-                        let w0 = _mm512_set1_ps(b.values[i]);
-                        let ptr0 = src_intermediate
-                            .as_ptr()
-                            .add(start_y * width as usize + x_chunk as usize);
-                        let p0 = _mm512_maskz_loadu_ps(mask, ptr0);
-                        acc0 = _mm512_fmadd_ps(p0, w0, acc0);
+                        if is_x86_feature_detected!("avx512f") {
+                            // Tap 0
+                            let w0 = _mm512_set1_ps(b.values[i]);
+                            let ptr0 = src_intermediate
+                                .as_ptr()
+                                .add(start_y * width as usize + x_chunk as usize);
+                            let p0 = _mm512_maskz_loadu_ps(mask, ptr0);
+                            acc0 = f32x16::from(_mm512_fmadd_ps(p0, w0, __m512::from(acc0)));
 
-                        // Tap 1
-                        let w1 = _mm512_set1_ps(b.values[i + 1]);
-                        let ptr1 = src_intermediate
-                            .as_ptr()
-                            .add((start_y + 1) * width as usize + x_chunk as usize);
-                        let p1 = _mm512_maskz_loadu_ps(mask, ptr1);
-                        acc1 = _mm512_fmadd_ps(p1, w1, acc1);
+                            // Tap 1
+                            let w1 = _mm512_set1_ps(b.values[i + 1]);
+                            let ptr1 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 1) * width as usize + x_chunk as usize);
+                            let p1 = _mm512_maskz_loadu_ps(mask, ptr1);
+                            acc1 = f32x16::from(_mm512_fmadd_ps(p1, w1, __m512::from(acc1)));
 
-                        // Tap 2
-                        let w2 = _mm512_set1_ps(b.values[i + 2]);
-                        let ptr2 = src_intermediate
-                            .as_ptr()
-                            .add((start_y + 2) * width as usize + x_chunk as usize);
-                        let p2 = _mm512_maskz_loadu_ps(mask, ptr2);
-                        acc2 = _mm512_fmadd_ps(p2, w2, acc2);
+                            // Tap 2
+                            let w2 = _mm512_set1_ps(b.values[i + 2]);
+                            let ptr2 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 2) * width as usize + x_chunk as usize);
+                            let p2 = _mm512_maskz_loadu_ps(mask, ptr2);
+                            acc2 = f32x16::from(_mm512_fmadd_ps(p2, w2, __m512::from(acc2)));
 
-                        // Tap 3
-                        let w3 = _mm512_set1_ps(b.values[i + 3]);
-                        let ptr3 = src_intermediate
-                            .as_ptr()
-                            .add((start_y + 3) * width as usize + x_chunk as usize);
-                        let p3 = _mm512_maskz_loadu_ps(mask, ptr3);
-                        acc3 = _mm512_fmadd_ps(p3, w3, acc3);
+                            // Tap 3
+                            let w3 = _mm512_set1_ps(b.values[i + 3]);
+                            let ptr3 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 3) * width as usize + x_chunk as usize);
+                            let p3 = _mm512_maskz_loadu_ps(mask, ptr3);
+                            acc3 = f32x16::from(_mm512_fmadd_ps(p3, w3, __m512::from(acc3)));
+                        } else {
+                            // Tap 0
+                            let w0 = f32x16::splat(b.values[i]);
+                            let ptr0 = src_intermediate
+                                .as_ptr()
+                                .add(start_y * width as usize + x_chunk as usize);
+                            let p0 = f32x16::load_select_ptr(
+                                ptr0,
+                                mask32x16::from_bitmask(u64::from(mask)),
+                                f32x16::splat(0.0),
+                            );
+                            acc0 = p0.mul_add(w0, acc0);
+
+                            // Tap 1
+                            let w1 = f32x16::splat(b.values[i + 1]);
+                            let ptr1 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 1) * width as usize + x_chunk as usize);
+                            let p1 = f32x16::load_select_ptr(
+                                ptr1,
+                                mask32x16::from_bitmask(u64::from(mask)),
+                                f32x16::splat(0.0),
+                            );
+                            acc1 = p1.mul_add(w1, acc1);
+
+                            // Tap 2
+                            let w2 = f32x16::splat(b.values[i + 2]);
+                            let ptr2 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 2) * width as usize + x_chunk as usize);
+                            let p2 = f32x16::load_select_ptr(
+                                ptr2,
+                                mask32x16::from_bitmask(u64::from(mask)),
+                                f32x16::splat(0.0),
+                            );
+                            acc2 = p2.mul_add(w2, acc2);
+
+                            // Tap 3
+                            let w3 = f32x16::splat(b.values[i + 3]);
+                            let ptr3 = src_intermediate
+                                .as_ptr()
+                                .add((start_y + 3) * width as usize + x_chunk as usize);
+                            let p3 = f32x16::load_select_ptr(
+                                ptr3,
+                                mask32x16::from_bitmask(u64::from(mask)),
+                                f32x16::splat(0.0),
+                            );
+                            acc3 = p3.mul_add(w3, acc3);
+                        }
 
                         i += 4;
                     }
@@ -830,19 +880,19 @@ unsafe fn lanczos3_vertical_pass_avx512(
                     let pixels = _mm512_maskz_loadu_ps(mask, src_ptr);
 
                     // Accumulate into acc0
-                    acc0 = _mm512_fmadd_ps(pixels, weight_vec, acc0);
+                    acc0 = f32x16::from(_mm512_fmadd_ps(pixels, weight_vec, __m512::from(acc0)));
                     i += 1;
                 }
 
-                let acc01 = _mm512_add_ps(acc0, acc1);
-                let acc23 = _mm512_add_ps(acc2, acc3);
-                let acc = _mm512_add_ps(acc01, acc23);
+                let acc01 = f32x16::from(_mm512_add_ps(__m512::from(acc0), __m512::from(acc1)));
+                let acc23 = f32x16::from(_mm512_add_ps(__m512::from(acc2), __m512::from(acc3)));
+                let acc = f32x16::from(_mm512_add_ps(__m512::from(acc01), __m512::from(acc23)));
 
                 // Store the 16 results into the destination row
                 let dst_ptr = dst
                     .as_mut_ptr()
                     .add(y_dst * width as usize + x_chunk as usize);
-                _mm512_mask_storeu_ps(dst_ptr, mask, acc);
+                _mm512_mask_storeu_ps(dst_ptr, mask, acc.into());
             }
         }
     }
