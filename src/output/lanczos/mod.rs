@@ -7,7 +7,6 @@ use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 use std::mem;
 use std::simd::{StdFloat, prelude::*};
 
-
 const LANCZOS_RADIUS: f32 = 3.0;
 //const ROUNDING_MODE: i32 = _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC;
 
