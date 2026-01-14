@@ -16,6 +16,7 @@
 #![allow(clippy::inline_always)]
 #![allow(clippy::used_underscore_binding)]
 #![allow(clippy::similar_names)]
+#![allow(clippy::too_many_lines)]
 
 use image::{AnimationDecoder, DynamicImage};
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
