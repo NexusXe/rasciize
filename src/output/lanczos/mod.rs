@@ -1,5 +1,4 @@
 use std::arch::x86_64::*;
-use std::ptr::{read_unaligned, write_unaligned};
 
 use image::DynamicImage;
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
@@ -207,9 +206,9 @@ impl PlanarBuffer {
 
                 let (v0, v1, v2) = Self::interleave_rgb(r_batch, g_batch, b_batch);
 
-                write_unaligned(output_ptr.add(pix * 3).cast(), v0);
-                write_unaligned(output_ptr.add(pix * 3 + 64).cast(), v1);
-                write_unaligned(output_ptr.add(pix * 3 + 128).cast(), v2);
+                *output_ptr.add(pix * 3).cast() = v0;
+                *output_ptr.add(pix * 3 + 64).cast() = v1;
+                *output_ptr.add(pix * 3 + 128).cast() = v2;
 
                 pix += 64;
             }
@@ -365,9 +364,8 @@ impl PlanarBuffer {
     }
 
     #[inline(always)]
+    /// Safety: SCALE must be 1, 2, 4, or 8 per x86 gather rules
     pub unsafe fn simd_i32gather_ps<const SCALE: i32>(offsets: i32x16, base: *const f32) -> f32x16 {
-        // SCALE must be 1, 2, 4, or 8 per x86 gather rules
-        //debug_assert!(matches!(SCALE, 1 | 2 | 4 | 8));
         const {
             assert!(
                 !(SCALE != 1 && SCALE != 2 && SCALE != 4 && SCALE != 8),
@@ -378,14 +376,9 @@ impl PlanarBuffer {
         let mut output = [0.0f32; 16];
 
         for (offset, out_f) in offsets.as_array().iter().zip(output.iter_mut()) {
-            // Compute byte offset exactly like the intrinsic
             let byte_offset = *offset as isize * SCALE as isize;
-
-            // Convert base pointer to byte pointer
             let addr = unsafe { base.byte_offset(byte_offset) };
-
-            // Unchecked load — identical UB semantics to AVX-512 gather
-            *out_f = unsafe { read_unaligned(addr) };
+            *out_f = unsafe { *addr };
         }
 
         f32x16::from_array(output)
@@ -443,7 +436,6 @@ fn sinc(x: f32) -> f32 {
 #[inline(always)]
 #[allow(clippy::unreadable_literal)]
 pub fn sinc_approx(x: f32) -> f32 {
-    // Minimax coefficients optimized for [0, 1]
     const C0: f32 = 0.999996;
     const C1: f32 = -1.6448622;
     const C2: f32 = 0.8114296;
@@ -529,7 +521,7 @@ pub fn precompute_weights(src_size: u32, dst_size: u32) -> FilterBank {
     bounds
 }
 
-#[inline(always)]
+#[inline]
 unsafe fn lanczos3_horizontal_pass_avx512(
     src: &[f32],
     dst: &mut [f32],
@@ -545,12 +537,11 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     // Determine max filter size for padding
     let max_taps = filters.iter().map(|f| f.values.len()).max().unwrap_or(0);
 
-    // Precompute transposed weights and indices for SIMD processing
-    // We process 16 destination pixels at a time.
+    // Precompute transposed weights and indices
     // Transposed weights layout: [block][tap][lane_in_block]
     let num_blocks = dst_width.div_ceil(16) as usize;
-    let mut indices_store = vec![0i32; num_blocks * 16];
-    let mut weights_store = vec![0.0f32; num_blocks * max_taps * 16];
+    let mut indices_store = vec![i32x16::splat(0); num_blocks];
+    let mut weights_store = vec![f32x16::splat(0.0); num_blocks * max_taps];
 
     for (i, f) in filters.iter().enumerate() {
         let block = i / 16;
@@ -559,13 +550,13 @@ unsafe fn lanczos3_horizontal_pass_avx512(
         // might wrap on 32-bit systems, but that's fine
         #[allow(clippy::cast_possible_wrap)]
         {
-            indices_store[block * 16 + lane] = f.start_index as i32;
+            indices_store[block].as_mut_array()[lane] = f.start_index as i32;
         }
 
         for (t, &w) in f.values.iter().enumerate() {
             // Linear index for the weight: block * (stride) + tap * 16 + lane
-            let idx = block * (max_taps * 16) + t * 16 + lane;
-            weights_store[idx] = w;
+            let idx = block * max_taps + t;
+            weights_store[idx].as_mut_array()[lane] = w;
         }
     }
 
@@ -588,10 +579,9 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 };
 
                 // Load base starting indices for this block of 16 pixels
-                let mut v_indices: i32x16 =
-                    read_unaligned(indices_store.as_ptr().add(b * 16).cast());
+                let mut v_indices = indices_store[b];
 
-                // Unrolling factor of 4 to hide FMA latency (Zen 5 FMA latency ~4 cycles)
+                // Unroll
                 let mut v_acc0: f32x16 = mem::zeroed();
                 let mut v_acc1: f32x16 = mem::zeroed();
                 let mut v_acc2: f32x16 = mem::zeroed();
@@ -607,10 +597,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                     let mut v_indices = __m512i::from(v_indices);
                     // Main unrolled loop
                     while t + 4 <= max_taps {
-                        let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-                        let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
-                        let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
-                        let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
+                        let base_idx = b * max_taps + t;
 
                         let src_limit = __m512i::from(src_limit);
                         let v_one = __m512i::from(v_one);
@@ -618,28 +605,28 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                         let v_three = __m512i::from(v_three);
                         let v_four = __m512i::from(v_four);
                         // Tap 0
-                        let v_w0 = _mm512_loadu_ps(w_ptr0);
+                        let v_w0 = __m512::from(weights_store[base_idx]);
                         // v_indices is already correct for t
                         let v_idx0 = _mm512_min_epi32(v_indices, src_limit);
                         let v_src0 = _mm512_i32gather_ps(v_idx0, src_row.cast(), 4);
                         v_acc0 = f32x16::from(_mm512_fmadd_ps(v_w0, v_src0, __m512::from(v_acc0)));
 
                         // Tap 1
-                        let v_w1 = _mm512_loadu_ps(w_ptr1);
+                        let v_w1 = __m512::from(weights_store[base_idx + 1]);
                         let v_idx1_raw = _mm512_add_epi32(v_indices, v_one);
                         let v_idx1 = _mm512_min_epi32(v_idx1_raw, src_limit);
                         let v_src1 = _mm512_i32gather_ps(v_idx1, src_row.cast(), 4);
                         v_acc1 = f32x16::from(_mm512_fmadd_ps(v_w1, v_src1, __m512::from(v_acc1)));
 
                         // Tap 2
-                        let v_w2 = _mm512_loadu_ps(w_ptr2);
+                        let v_w2 = __m512::from(weights_store[base_idx + 2]);
                         let v_idx2_raw = _mm512_add_epi32(v_indices, v_two);
                         let v_idx2 = _mm512_min_epi32(v_idx2_raw, src_limit);
                         let v_src2 = _mm512_i32gather_ps(v_idx2, src_row.cast(), 4);
                         v_acc2 = f32x16::from(_mm512_fmadd_ps(v_w2, v_src2, __m512::from(v_acc2)));
 
                         // Tap 3
-                        let v_w3 = _mm512_loadu_ps(w_ptr3);
+                        let v_w3 = __m512::from(weights_store[base_idx + 3]);
                         let v_idx3_raw = _mm512_add_epi32(v_indices, v_three);
                         let v_idx3 = _mm512_min_epi32(v_idx3_raw, src_limit);
                         let v_src3 = _mm512_i32gather_ps(v_idx3, src_row.cast(), 4);
@@ -651,9 +638,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
 
                     // Handle remaining taps
                     while t < max_taps {
-                        let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-
-                        let v_w = _mm512_loadu_ps(w_ptr);
+                        let v_w = __m512::from(weights_store[b * max_taps + t]);
                         let v_idx_clamped = _mm512_min_epi32(v_indices, __m512i::from(src_limit));
                         let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
 
@@ -666,34 +651,31 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                 } else {
                     // Main unrolled loop
                     while t + 4 <= max_taps {
-                        let w_ptr0 = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-                        let w_ptr1 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 1) * 16);
-                        let w_ptr2 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 2) * 16);
-                        let w_ptr3 = weights_store.as_ptr().add(b * max_taps * 16 + (t + 3) * 16);
+                        let base_idx = b * max_taps + t;
 
                         // Tap 0
-                        let v_w0: f32x16 = read_unaligned(w_ptr0.cast());
+                        let v_w0 = weights_store[base_idx];
                         // v_indices is already correct for t
                         let v_idx0 = v_indices.simd_min(src_limit);
                         let v_src0 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx0, src_row);
                         v_acc0 = v_w0.mul_add(v_src0, v_acc0);
 
                         // Tap 1
-                        let v_w1: f32x16 = read_unaligned(w_ptr1.cast());
+                        let v_w1 = weights_store[base_idx + 1];
                         let v_idx1_raw = v_indices + v_one;
                         let v_idx1 = v_idx1_raw.simd_min(src_limit);
                         let v_src1 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx1, src_row);
                         v_acc1 = v_w1.mul_add(v_src1, v_acc1);
 
                         // Tap 2
-                        let v_w2: f32x16 = read_unaligned(w_ptr2.cast());
+                        let v_w2 = weights_store[base_idx + 2];
                         let v_idx2_raw = v_indices + v_two;
                         let v_idx2 = v_idx2_raw.simd_min(src_limit);
                         let v_src2 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx2, src_row);
                         v_acc2 = v_w2.mul_add(v_src2, v_acc2);
 
                         // Tap 3
-                        let v_w3: f32x16 = read_unaligned(w_ptr3.cast());
+                        let v_w3 = weights_store[base_idx + 3];
                         let v_idx3_raw = v_indices + v_three;
                         let v_idx3 = v_idx3_raw.simd_min(src_limit);
                         let v_src3 = PlanarBuffer::simd_i32gather_ps::<4>(v_idx3, src_row);
@@ -705,9 +687,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
 
                     // Handle remaining taps
                     while t < max_taps {
-                        let w_ptr = weights_store.as_ptr().add(b * max_taps * 16 + t * 16);
-
-                        let v_w: f32x16 = read_unaligned(w_ptr.cast());
+                        let v_w = weights_store[b * max_taps + t];
                         let v_idx_clamped = v_indices.simd_min(src_limit);
                         let v_src = PlanarBuffer::simd_i32gather_ps::<4>(v_idx_clamped, src_row);
 

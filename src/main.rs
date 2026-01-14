@@ -21,7 +21,7 @@ use image::{AnimationDecoder, DynamicImage};
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 
 const FONT_TTF: &[u8] = include_bytes!("./fonts/CascadiaMono-Regular.ttf");
-const LUT_FONT_SIZE: u16 = 512; // Size in pixels
+const LUT_FONT_SIZE: u16 = 256; // Size in pixels
 const RASTER_SIZE: u16 = 32; // Size in pixels
 
 mod font;
