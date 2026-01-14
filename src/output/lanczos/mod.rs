@@ -637,7 +637,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                     }
 
                     // Handle remaining taps
-                    while t < max_taps {
+                    for t in t..max_taps {
                         let v_w = __m512::from(weights_store[b * max_taps + t]);
                         let v_idx_clamped = _mm512_min_epi32(v_indices, __m512i::from(src_limit));
                         let v_src = _mm512_i32gather_ps(v_idx_clamped, src_row.cast(), 4);
@@ -645,7 +645,6 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                         // Use acc0 for remainder
                         v_acc0 = f32x16::from(_mm512_fmadd_ps(v_w, v_src, __m512::from(v_acc0)));
 
-                        t += 1;
                         v_indices = _mm512_add_epi32(v_indices, __m512i::from(v_one));
                     }
                 } else {
@@ -686,7 +685,7 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                     }
 
                     // Handle remaining taps
-                    while t < max_taps {
+                    for t in t..max_taps {
                         let v_w = weights_store[b * max_taps + t];
                         let v_idx_clamped = v_indices.simd_min(src_limit);
                         let v_src = PlanarBuffer::simd_i32gather_ps::<4>(v_idx_clamped, src_row);
@@ -694,7 +693,6 @@ unsafe fn lanczos3_horizontal_pass_avx512(
                         // Use acc0 for remainder
                         v_acc0 = v_w.mul_add(v_src, v_acc0);
 
-                        t += 1;
                         v_indices += v_one;
                     }
                 }
@@ -714,16 +712,24 @@ unsafe fn lanczos3_horizontal_pass_avx512(
     }
 }
 
-/// Helper to cast &[f32x16] -> &[f32]
+/// Helper to cast &[Simd<T, N>] -> &[T]
 #[inline(always)]
-const fn as_f32(v: &[f32x16]) -> &[f32] {
-    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<f32>(), v.len() * 16) }
+const fn as_f32<T, const N: usize>(v: &[Simd<T, N>]) -> &[T]
+where
+    std::simd::LaneCount<N>: std::simd::SupportedLaneCount,
+    T: std::simd::SimdElement,
+{
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<T>(), v.len() * N) }
 }
 
-/// Helper to cast &mut [f32x16] -> &mut [f32]
+/// Helper to cast &mut [Simd<T, N>] -> &mut [T]
 #[inline(always)]
-const fn as_f32_mut(v: &mut [f32x16]) -> &mut [f32] {
-    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<f32>(), v.len() * 16) }
+const fn as_f32_mut<T, const N: usize>(v: &mut [Simd<T, N>]) -> &mut [T]
+where
+    std::simd::LaneCount<N>: std::simd::SupportedLaneCount,
+    T: std::simd::SimdElement,
+{
+    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<T>(), v.len() * N) }
 }
 
 #[inline(always)]
