@@ -767,7 +767,7 @@ fn lanczos3_horizontal(src: &PlanarBuffer, dst_width: u32, filters: &FilterBank)
     dst
 }
 
-#[inline(always)]
+#[inline]
 unsafe fn lanczos3_vertical_pass_avx512(
     src_intermediate: &[f32], // Result of the horizontal pass
     dst: &mut [f32],
