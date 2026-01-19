@@ -172,8 +172,15 @@ impl PlanarBuffer {
         }
     }
 
-    fn to_rgb32fimage(&self) -> Rgb32FImage {
+    #[inline]
+    fn into_rgb32fimage(mut self) -> Rgb32FImage {
         let mut output = Rgb32FImage::new(self.width, self.height);
+        let channels = [&mut self.red, &mut self.green, &mut self.blue];
+        for channel in channels {
+            for v in channel.iter_mut() {
+                *v /= Simd::splat(255.0);
+            }
+        }
         let reds = as_f32(&self.red);
         let greens = as_f32(&self.green);
         let blues = as_f32(&self.blue);
@@ -181,15 +188,7 @@ impl PlanarBuffer {
             .iter()
             .zip(greens.iter())
             .zip(blues.iter())
-            .map(|((r, g), b)| {
-                Rgb(unsafe {
-                    [
-                        fdiv_fast(*r, 255.0),
-                        fdiv_fast(*g, 255.0),
-                        fdiv_fast(*b, 255.0),
-                    ]
-                })
-            });
+            .map(|((r, g), b)| Rgb([*r, *g, *b]));
 
         for (i, pixel) in pixels.enumerate() {
             output.put_pixel(i as u32 % self.width, i as u32 / self.width, pixel);
@@ -815,7 +814,7 @@ pub fn lanczos3_resize(
         dst_height,
         vertical_filters,
     );
-    DynamicImage::ImageRgb32F(dst.to_rgb32fimage())
+    DynamicImage::ImageRgb32F(dst.into_rgb32fimage())
 }
 
 #[cfg(test)]
