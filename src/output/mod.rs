@@ -7,6 +7,7 @@ use std::io::{self, prelude::*};
 use std::thread::sleep;
 
 use std::time::{Duration, Instant};
+use std::simd::{StdFloat, prelude::*};
 
 mod lanczos;
 
@@ -101,6 +102,18 @@ fn luminance(r: u8, g: u8, b: u8) -> FloatPrecision {
             fmul_fast(0.114, FloatPrecision::from(b * b)),
         )
     })
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+fn luminance_u8x64(r: u8x64, g: u8x64, b: u8x64) -> f32x64 {
+    let r: f32x64 = r.cast();
+    let g: f32x64 = g.cast();
+    let b: f32x64 = b.cast();
+    let r2 = r * r;
+    let g2 = g * g;
+    let b2 = b * b;
+    let sum = r2 * f32x64::splat(0.299) + g2 * f32x64::splat(0.587) + b2 * f32x64::splat(0.114);
+    sum.sqrt()
 }
 
 #[inline]

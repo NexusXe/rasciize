@@ -25,7 +25,7 @@ debug-assertions = false
 overflow-checks = false
 codegen-units = 1
 panic = "abort"
-rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static", "-Z", "share-generics"]
+rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=native", "-C", "target-feature=+crt-static", "-Z", "share-generics"]
 lto = "fat"
 
 [profile.release.build-override]
@@ -35,7 +35,7 @@ debug = false
 debug-assertions = false
 overflow-checks = false
 codegen-units = 1
-rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=x86-64-v3", "-Z", "share-generics"]
+rustflags = ["-Z", "fmt-debug=none", "-C", "target-cpu=native", "-Z", "share-generics"]
 
 [profile.release.package."*"]
 strip = true
@@ -43,15 +43,15 @@ opt-level = 3
 debug = false
 debug-assertions = false
 overflow-checks = false
-rustflags = ["-C", "target-cpu=x86-64-v3", "-Z", "share-generics"]
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
 
 [profile.dev]
 opt-level = 1
 debug = true
 debug-assertions = true
 overflow-checks = true
-rustflags = ["-C", "target-cpu=x86-64-v3", "-Z", "share-generics"]
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
 
 [profile.dev.package."*"]
 opt-level = 3
-rustflags = ["-C", "target-cpu=x86-64-v3", "-Z", "share-generics"]
+rustflags = ["-C", "target-cpu=native", "-Z", "share-generics"]
