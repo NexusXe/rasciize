@@ -6,8 +6,8 @@ use std::intrinsics::prefetch_read_data;
 use std::io::{self, prelude::*};
 use std::thread::sleep;
 
-use std::time::{Duration, Instant};
 use std::simd::{StdFloat, prelude::*};
+use std::time::{Duration, Instant};
 
 mod lanczos;
 
@@ -93,18 +93,17 @@ fn luminance(r: u8, g: u8, b: u8) -> FloatPrecision {
     let b = u16::from(b);
     // Percieved luminance based on HSP (https://alienryderflex.com/hsp.html)
     // luminance = sqrt( 0.299*R^2 + 0.587*G^2 + 0.114*B^2 )
-    FloatPrecision::sqrt(unsafe {
-        fadd_fast(
-            fadd_fast(
-                fmul_fast(0.299, FloatPrecision::from(r * r)),
-                fmul_fast(0.587, FloatPrecision::from(g * g)),
-            ),
-            fmul_fast(0.114, FloatPrecision::from(b * b)),
-        )
-    })
+    let r2 = FloatPrecision::from(r * r);
+    let g2 = FloatPrecision::from(g * g);
+    let b2 = FloatPrecision::from(b * b);
+    let mut sum = unsafe { fmul_fast(r2, 0.299) };
+    sum = g2.mul_add(0.587, sum);
+    sum = b2.mul_add(0.114, sum);
+    sum.sqrt()
 }
 
 #[target_feature(enable = "avx512f,avx512bw")]
+#[allow(unused)]
 fn luminance_u8x64(r: u8x64, g: u8x64, b: u8x64) -> f32x64 {
     let r: f32x64 = r.cast();
     let g: f32x64 = g.cast();
