@@ -1,5 +1,3 @@
-use std::ptr::write_unaligned;
-
 use super::*;
 #[test]
 fn test_mm512_cvtepu8_ps() {

@@ -1,5 +1,4 @@
 use std::arch::x86_64::*;
-use std::ptr::read_unaligned;
 
 use image::{DynamicImage, Rgb, Rgb32FImage};
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
@@ -178,9 +177,19 @@ impl PlanarBuffer {
         let reds = as_f32(&self.red);
         let greens = as_f32(&self.green);
         let blues = as_f32(&self.blue);
-        let pixels = reds.iter().zip(greens.iter()).zip(blues.iter()).map(|((r, g), b)| {
-            Rgb(unsafe{[fdiv_fast(*r, 255.0), fdiv_fast(*g, 255.0), fdiv_fast(*b, 255.0)]})
-        });
+        let pixels = reds
+            .iter()
+            .zip(greens.iter())
+            .zip(blues.iter())
+            .map(|((r, g), b)| {
+                Rgb(unsafe {
+                    [
+                        fdiv_fast(*r, 255.0),
+                        fdiv_fast(*g, 255.0),
+                        fdiv_fast(*b, 255.0),
+                    ]
+                })
+            });
 
         for (i, pixel) in pixels.enumerate() {
             output.put_pixel(i as u32 % self.width, i as u32 / self.width, pixel);
