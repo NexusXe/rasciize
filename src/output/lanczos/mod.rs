@@ -1,7 +1,7 @@
 use std::arch::x86_64::*;
-use std::ptr::{read_unaligned, write_unaligned};
+use std::ptr::read_unaligned;
 
-use image::DynamicImage;
+use image::{DynamicImage, Rgb, Rgb32FImage};
 use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, fsub_fast};
 
 use std::mem;
@@ -173,195 +173,20 @@ impl PlanarBuffer {
         }
     }
 
-    fn to_rgb8(&self) -> DynamicImage {
-        let mut output = image::RgbImage::new(self.width, self.height);
-        let pixel_count = (self.width * self.height) as usize;
+    fn to_rgb32fimage(&self) -> Rgb32FImage {
+        let mut output = Rgb32FImage::new(self.width, self.height);
+        let reds = as_f32(&self.red);
+        let greens = as_f32(&self.green);
+        let blues = as_f32(&self.blue);
+        let pixels = reds.iter().zip(greens.iter()).zip(blues.iter()).map(|((r, g), b)| {
+            Rgb(unsafe{[fdiv_fast(*r, 255.0), fdiv_fast(*g, 255.0), fdiv_fast(*b, 255.0)]})
+        });
 
-        unsafe {
-            let red_ptr = self.red.as_ptr().cast::<__m512>();
-            let green_ptr = self.green.as_ptr().cast::<__m512>();
-            let blue_ptr = self.blue.as_ptr().cast::<__m512>();
-
-            let output_ptr = output.as_flat_samples_mut().samples.as_mut_ptr();
-
-            let mut pix = 0;
-            while pix + 64 <= pixel_count {
-                let r_batch = Self::pack_floats_to_u8(
-                    f32x16::from(*red_ptr.add(pix / 16)),
-                    f32x16::from(*red_ptr.add(pix / 16 + 1)),
-                    f32x16::from(*red_ptr.add(pix / 16 + 2)),
-                    f32x16::from(*red_ptr.add(pix / 16 + 3)),
-                );
-                let g_batch = Self::pack_floats_to_u8(
-                    f32x16::from(*green_ptr.add(pix / 16)),
-                    f32x16::from(*green_ptr.add(pix / 16 + 1)),
-                    f32x16::from(*green_ptr.add(pix / 16 + 2)),
-                    f32x16::from(*green_ptr.add(pix / 16 + 3)),
-                );
-                let b_batch = Self::pack_floats_to_u8(
-                    f32x16::from(*blue_ptr.add(pix / 16)),
-                    f32x16::from(*blue_ptr.add(pix / 16 + 1)),
-                    f32x16::from(*blue_ptr.add(pix / 16 + 2)),
-                    f32x16::from(*blue_ptr.add(pix / 16 + 3)),
-                );
-
-                let (v0, v1, v2) = Self::interleave_rgb(r_batch, g_batch, b_batch);
-
-                write_unaligned(output_ptr.add(pix * 3).cast(), v0);
-                write_unaligned(output_ptr.add(pix * 3 + 64).cast(), v1);
-                write_unaligned(output_ptr.add(pix * 3 + 128).cast(), v2);
-
-                pix += 64;
-            }
-
-            // Remainder scalar fallback
-            let r_slice = as_f32(&self.red);
-            let g_slice = as_f32(&self.green);
-            let b_slice = as_f32(&self.blue);
-
-            for i in pix..pixel_count {
-                let r_val = r_slice[i].round().clamp(0.0, 255.0) as u8;
-                let g_val = g_slice[i].round().clamp(0.0, 255.0) as u8;
-                let b_val = b_slice[i].round().clamp(0.0, 255.0) as u8;
-                *output.get_pixel_mut(i as u32 % self.width, i as u32 / self.width) =
-                    image::Rgb([r_val, g_val, b_val]);
-            }
+        for (i, pixel) in pixels.enumerate() {
+            output.put_pixel(i as u32 % self.width, i as u32 / self.width, pixel);
         }
 
-        image::DynamicImage::ImageRgb8(output)
-    }
-
-    // Helper: Pack 64 floats to 64 bytes with clamping
-    #[inline(always)]
-    fn pack_floats_to_u8(v0: f32x16, v1: f32x16, v2: f32x16, v3: f32x16) -> u8x64 {
-        if is_x86_feature_detected!("avx512f") {
-            unsafe {
-                // Round to nearest integer (cvteps_epi32)
-                let i0 = _mm512_cvttps_epi32(v0.into());
-                let i1 = _mm512_cvttps_epi32(v1.into());
-                let i2 = _mm512_cvttps_epi32(v2.into());
-                let i3 = _mm512_cvttps_epi32(v3.into());
-
-                // Pack with unsigned saturation to u8 (AVX-512F/BW/DQ)
-                let b0 = _mm512_cvtusepi32_epi8(i0); // 16 bytes in __m128i
-                let b1 = _mm512_cvtusepi32_epi8(i1);
-                let b2 = _mm512_cvtusepi32_epi8(i2);
-                let b3 = _mm512_cvtusepi32_epi8(i3);
-
-                // Combine 4 XMMs into one ZMM
-                u8x64::from(_mm512_inserti32x4(
-                    _mm512_inserti32x4(
-                        _mm512_inserti32x4(_mm512_castsi128_si512(b0), b1, 1),
-                        b2,
-                        2,
-                    ),
-                    b3,
-                    3,
-                ))
-            }
-        } else {
-            // no built-in saturating cast, but luckily as-casting float to int saturates so that's what portable_simd cast() does
-            // relevant issue: https://github.com/rust-lang/portable-simd/issues/369
-            let b0: u8x16 = v0.cast();
-            let b1: u8x16 = v1.cast();
-            let b2: u8x16 = v2.cast();
-            let b3: u8x16 = v3.cast();
-
-            unsafe { mem::transmute::<[u8x16; 4], u8x64>([b0, b1, b2, b3]) }
-        }
-    }
-
-    // compiles into a disgusting straight-through of instructions. how
-    #[inline(always)]
-    fn interleave(r: u8x64, g: u8x64, b: u8x64, raw_idx: &[u8; 64]) -> u8x64 {
-        let mut idx_low = [0u8; 64];
-        let mut idx_high = [0u8; 64];
-        let mut mask_val = 0u64;
-
-        for (i, &src) in raw_idx.iter().enumerate() {
-            let src_val = u32::from(src);
-            if src_val < 128 {
-                idx_low[i] = src_val as u8;
-            } else {
-                idx_high[i] = (src_val - 64) as u8;
-                mask_val |= 1 << i;
-            }
-        }
-
-        if is_x86_feature_detected!("avx512vbmi") && is_x86_feature_detected!("avx512bw") {
-            unsafe {
-                let m = _cvtu64_mask64(mask_val);
-                let res_low = _mm512_permutex2var_epi8(
-                    __m512i::from(r),
-                    _mm512_loadu_si512(idx_low.as_ptr().cast()),
-                    __m512i::from(g),
-                );
-                let res_high = _mm512_permutex2var_epi8(
-                    __m512i::from(g),
-                    _mm512_loadu_si512(idx_high.as_ptr().cast()),
-                    __m512i::from(b),
-                );
-
-                u8x64::from(_mm512_mask_blend_epi8(m, res_low, res_high))
-            }
-        } else {
-            let m: mask8x64 = mask8x64::from_bitmask(mask_val);
-            let low_vector: u8x64 = u8x64::from_slice(&idx_low);
-            let high_vector: u8x64 = u8x64::from_slice(&idx_high);
-            let res_low = Self::permutex2var_epi8(r, low_vector, g);
-            let res_high = Self::permutex2var_epi8(g, high_vector, b);
-            m.select(res_high, res_low)
-        }
-    }
-
-    // Helper: Interleave planar R, G, B into packed RGB (VBMI)
-    #[inline(always)]
-    fn interleave_rgb(r: u8x64, g: u8x64, b: u8x64) -> (u8x64, u8x64, u8x64) {
-        // Define indices for the 3 output registers
-        let mut idx0 = [0u8; 64];
-        let mut idx1 = [0u8; 64];
-        let mut idx2 = [0u8; 64];
-
-        for i in 0..64 {
-            let pixel_idx = i / 3;
-            let channel = i % 3;
-            let val = if channel == 0 {
-                pixel_idx
-            } else if channel == 1 {
-                pixel_idx + 64
-            } else {
-                pixel_idx + 128
-            };
-            idx0[i] = val as u8;
-
-            let pixel_idx = (i + 64) / 3;
-            let channel = (i + 64) % 3;
-            let val = if channel == 0 {
-                pixel_idx
-            } else if channel == 1 {
-                pixel_idx + 64
-            } else {
-                pixel_idx + 128
-            };
-            idx1[i] = val as u8;
-
-            let pixel_idx = (i + 128) / 3;
-            let channel = (i + 128) % 3;
-            let val = if channel == 0 {
-                pixel_idx
-            } else if channel == 1 {
-                pixel_idx + 64
-            } else {
-                pixel_idx + 128
-            };
-            idx2[i] = val as u8;
-        }
-
-        let v0 = Self::interleave(r, g, b, &idx0);
-        let v1 = Self::interleave(r, g, b, &idx1);
-        let v2 = Self::interleave(r, g, b, &idx2);
-
-        (v0, v1, v2)
+        output
     }
 
     #[inline(always)]
@@ -950,7 +775,7 @@ pub fn lanczos3_resize(
         dst_height,
         vertical_filters,
     );
-    dst.to_rgb8()
+    DynamicImage::ImageRgb32F(dst.to_rgb32fimage())
 }
 
 #[cfg(test)]
