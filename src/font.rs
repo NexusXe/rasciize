@@ -11,7 +11,7 @@ pub type IntensityMap<V> = BTreeMap<OrderedFloat<FloatPrecision>, V>;
 // source: https://9p.io/sources/plan9/sys/include/ctype.h
 #[allow(unused)]
 #[inline(always)]
-fn glyph_is_safe(input: u16) -> bool {
+const fn glyph_is_safe(input: u16) -> bool {
     // #define	isalpha(c)	(_ctype[(unsigned char)(c)]&(_U|_L))
     // #define	isupper(c)	(_ctype[(unsigned char)(c)]&_U)
     // #define	islower(c)	(_ctype[(unsigned char)(c)]&_L)
@@ -37,55 +37,55 @@ fn glyph_is_safe(input: u16) -> bool {
     const B: u16 = 0x0100;
     const X: u16 = 0x0200;
 
-    fn is_alpha(input: u16) -> bool {
+    const fn is_alpha(input: u16) -> bool {
         (input & (U | L)) != 0
     }
 
-    fn is_upper(input: u16) -> bool {
+    const fn is_upper(input: u16) -> bool {
         (input & U) != 0
     }
 
-    fn is_lower(input: u16) -> bool {
+    const fn is_lower(input: u16) -> bool {
         (input & L) != 0
     }
 
-    fn is_digit(input: u16) -> bool {
+    const fn is_digit(input: u16) -> bool {
         (input & N) != 0
     }
 
-    fn is_xdigit(input: u16) -> bool {
+    const fn is_xdigit(input: u16) -> bool {
         (input & X) != 0
     }
 
-    fn is_space(input: u16) -> bool {
+    const fn is_space(input: u16) -> bool {
         (input & S) != 0
     }
 
-    fn is_punct(input: u16) -> bool {
+    const fn is_punct(input: u16) -> bool {
         (input & P) != 0
     }
 
-    fn is_alnum(input: u16) -> bool {
+    const fn is_alnum(input: u16) -> bool {
         (input & (U | L | N)) != 0
     }
 
-    fn is_print(input: u16) -> bool {
+    const fn is_print(input: u16) -> bool {
         (input & (P | U | L | N | B)) != 0
     }
 
-    fn is_graph(input: u16) -> bool {
+    const fn is_graph(input: u16) -> bool {
         (input & (P | U | L | N)) != 0
     }
 
-    fn is_cntrl(input: u16) -> bool {
+    const fn is_cntrl(input: u16) -> bool {
         (input & C) != 0
     }
 
-    fn is_ascii(input: u16) -> bool {
+    const fn is_ascii(input: u16) -> bool {
         input <= 0x7F
     }
 
-    fn to_ascii(input: u16) -> u16 {
+    const fn to_ascii(input: u16) -> u16 {
         input & 0x7F
     }
 
@@ -100,8 +100,8 @@ pub fn get_coverage_array(
 ) -> Option<Vec<Vec<f32>>> {
     // initially get a coverage array at 4x scale and only keep every fourth row to get a 4x wide character for printing in a terminal
     let font_size = f32::from(font_size * 4);
-    match font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size))) {
-        Some(outlined_glyph) => {
+    font.outline_glyph(glyph_id.with_scale(PxScale::from(font_size)))
+        .map(|outlined_glyph| {
             let bounds = outlined_glyph.px_bounds();
             let mut coverage_array: Vec<Vec<f32>> =
                 vec![vec![0.0; bounds.width() as usize]; bounds.height() as usize];
@@ -114,10 +114,8 @@ pub fn get_coverage_array(
                 .enumerate()
                 .filter_map(|(i, row)| if i % 4 == 0 { Some(row) } else { None })
                 .collect();
-            Some(coverage_array)
-        }
-        None => None,
-    }
+            coverage_array
+        })
 }
 
 #[inline]

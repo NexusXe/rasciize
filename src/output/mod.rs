@@ -166,7 +166,7 @@ pub fn image(
     }
 
     let mut frames = Vec::new();
-    if let Some(image::ImageFormat::Gif) = input.format() {
+    if input.format() == Some(image::ImageFormat::Gif) {
         // crazy shuffling between DynamicImage is fine because it's done once
         let gif_decoder = image::codecs::gif::GifDecoder::new(input.into_inner())?;
         let gif_frames = gif_decoder.into_frames();

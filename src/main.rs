@@ -44,17 +44,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args[1].as_str() {
         "--text" => text(&font, &intensity_lookup),
 
-        "--image" => match args.get(2) {
-            None => {
+        "--image" => args.get(2).map_or_else(
+            || {
                 eprintln!("Please provide an output filename for the image.");
                 std::process::exit(1)
-            }
-
-            Some(filename) => {
+            },
+            |filename| {
                 let spicy = args.contains(&"--spicy".to_string());
                 image(&intensity_lookup, filename, spicy)
-            }
-        },
+            },
+        ),
 
         _ => {
             eprintln!("Unknown argument: {}", args[1]);

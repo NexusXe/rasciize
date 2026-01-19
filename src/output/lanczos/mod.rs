@@ -795,6 +795,7 @@ fn lanczos3_vertical(src: &PlanarBuffer, dst_height: u32, filters: &FilterBank) 
     dst
 }
 
+#[inline]
 pub fn lanczos3_resize(
     input: &DynamicImage,
     dst_width: u32,
