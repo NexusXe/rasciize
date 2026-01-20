@@ -289,13 +289,11 @@ pub fn image(
                 }
 
                 let get_pixel_info =
-                    |x: u32, y: u32, p: &Rgb<f32>, f_num: usize| -> (char, Rgb<f32>) {
-                        let sc_r = unsafe{fmul_fast(p[0], 255.0)};
-                        let sc_g = unsafe{fmul_fast(p[1], 255.0)};
-                        let sc_b = unsafe{fmul_fast(p[2], 255.0)};
-                        //dbg!(&sc_r, &sc_g, &sc_b);
-                        let lum = luminance(sc_r, sc_g, sc_b);
-                        let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
+                    |x: u32, y: u32, p: &Rgb<f32>, f_num: usize| -> Option<(char, Rgb<f32>)> {
+                        let sc_r = p[0];
+                        let sc_g = p[1];
+                        let sc_b = p[2];
+                        let mut lum = luminance(sc_r, sc_g, sc_b);
 
                         if spicy {
                             // slightly randomize
@@ -347,19 +345,13 @@ pub fn image(
                                 unsafe { fsub_fast(res, 1.5) }
                             };
 
-                            lum_scaled = unsafe {
-                                fadd_fast(
-                                    lum_scaled,
-                                    fmul_fast(FloatPrecision::from(random_value), 0.0001),
-                                )
+                            lum = unsafe {
+                            fadd_fast(lum, fmul_fast(FloatPrecision::from(random_value), 0.0001))
                             };
                         }
-                        let ch = find_nearest_optimized(intensity_lookup, lum_scaled)
-                            .unwrap()
-                            .1;
-
+                        let ch = find_nearest_optimized(intensity_lookup, lum)?.1;
                         let color = maximize(*p);
-                        (*ch, color)
+                        Some((*ch, color))
                     };
 
                 #[cfg(feature = "truecolor")]
@@ -372,13 +364,13 @@ pub fn image(
                     let mut skip_count = 0;
                     for x in 0..img.width() {
                         let pixel = img.get_pixel(x, y);
-                        let (ch, color) = get_pixel_info(x, y, pixel, frame_number);
+                        let (ch, color) = get_pixel_info(x, y, pixel, frame_number).unwrap();
 
                         let mut is_redundant = false;
                         if let Some(p_img) = prev_img {
                             let prev_pixel = p_img.get_pixel(x, y);
                             let (prev_ch, prev_color) =
-                                get_pixel_info(x, y, prev_pixel, frame_number - 1);
+                                get_pixel_info(x, y, prev_pixel, frame_number - 1).unwrap();
 
                             if ch == prev_ch {
                                 #[cfg(feature = "truecolor")]
