@@ -115,7 +115,11 @@ fn luminance_u8x64(r: u8x64, g: u8x64, b: u8x64) -> f32x64 {
 
 #[inline]
 fn maximize(color: Rgb<f32>) -> Rgb<f32> {
-    let max_component = FloatPrecision::from([color[0], color[1], color[2]].iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+    let max_component = FloatPrecision::from(
+        [color[0], color[1], color[2]]
+            .iter()
+            .fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+    );
     if max_component == 0.0 {
         return Rgb([0.0, 0.0, 0.0]);
     }
@@ -124,9 +128,24 @@ fn maximize(color: Rgb<f32>) -> Rgb<f32> {
     let maximum_r = unsafe { fmul_fast(FloatPrecision::from(color[0]), scale) };
     let maximum_g = unsafe { fmul_fast(FloatPrecision::from(color[1]), scale) };
     let maximum_b = unsafe { fmul_fast(FloatPrecision::from(color[2]), scale) };
-    let half_r = unsafe { fdiv_fast(fadd_fast(maximum_r, FloatPrecision::from(color[0])), 2.0) };
-    let half_g = unsafe { fdiv_fast(fadd_fast(maximum_g, FloatPrecision::from(color[1])), 2.0) };
-    let half_b = unsafe { fdiv_fast(fadd_fast(maximum_b, FloatPrecision::from(color[2])), 2.0) };
+    let half_r = unsafe {
+        fdiv_fast(
+            fadd_fast(maximum_r, fmul_fast(FloatPrecision::from(color[0]), 255.0)),
+            2.0,
+        )
+    };
+    let half_g = unsafe {
+        fdiv_fast(
+            fadd_fast(maximum_g, fmul_fast(FloatPrecision::from(color[1]), 255.0)),
+            2.0,
+        )
+    };
+    let half_b = unsafe {
+        fdiv_fast(
+            fadd_fast(maximum_b, fmul_fast(FloatPrecision::from(color[2]), 255.0)),
+            2.0,
+        )
+    };
 
     Rgb([half_r, half_g, half_b])
 }
@@ -288,71 +307,74 @@ pub fn image(
                     output_buffer.push_str("{ESCAPE}[37m");
                 }
 
-                let get_pixel_info =
-                    |x: u32, y: u32, p: &Rgb<f32>, f_num: usize| -> Option<(char, Rgb<f32>)> {
-                        let sc_r = p[0];
-                        let sc_g = p[1];
-                        let sc_b = p[2];
-                        let mut lum = luminance(sc_r, sc_g, sc_b);
+                let get_pixel_info = |x: u32,
+                                      y: u32,
+                                      p: &Rgb<f32>,
+                                      f_num: usize|
+                 -> Option<(char, Rgb<f32>)> {
+                    let sc_r = p[0];
+                    let sc_g = p[1];
+                    let sc_b = p[2];
+                    let mut lum = luminance(sc_r, sc_g, sc_b);
 
-                        if spicy {
-                            // slightly randomize
-                            let seed_data: u64 = u64::from(x)
-                                ^ u64::from(y).rotate_left(16)
-                                ^ (f_num as u64).rotate_left(32)
-                                ^ u64::from(sc_r.to_bits())
-                                ^ u64::from(sc_g.to_bits()).rotate_left(8)
-                                ^ u64::from(sc_b.to_bits()).rotate_left(24)
-                                ^ u64::from(lum.to_bits()).rotate_left(48); // a little bit of nonlinearity from the sqrt function in luminance()
+                    if spicy {
+                        // slightly randomize
+                        let seed_data: u64 = u64::from(x)
+                            ^ u64::from(y).rotate_left(16)
+                            ^ (f_num as u64).rotate_left(32)
+                            ^ u64::from(sc_r.to_bits())
+                            ^ u64::from(sc_g.to_bits()).rotate_left(8)
+                            ^ u64::from(sc_b.to_bits()).rotate_left(24)
+                            ^ u64::from(lum.to_bits()).rotate_left(48); // a little bit of nonlinearity from the sqrt function in luminance()
 
-                            let random_value: f32 = {
-                                const DOMAIN_CONST: u32 = 0x045d_9f3b;
+                        let random_value: f32 = {
+                            const DOMAIN_CONST: u32 = 0x045d_9f3b;
 
-                                #[inline(always)]
-                                fn murmur3_64to32_seeded<const SEED: u32>(data: u64) -> u32 {
-                                    let mut h: u32 = (data as u32) ^ (data >> 32) as u32;
+                            #[inline(always)]
+                            fn murmur3_64to32_seeded<const SEED: u32>(data: u64) -> u32 {
+                                let mut h: u32 = (data as u32) ^ (data >> 32) as u32;
 
-                                    h ^= SEED;
+                                h ^= SEED;
 
-                                    h ^= h >> 16;
-                                    h *= 0x7feb_352d;
-                                    h ^= h >> 15;
-                                    h *= 0x846c_a68b;
-                                    h ^= h >> 16;
+                                h ^= h >> 16;
+                                h *= 0x7feb_352d;
+                                h ^= h >> 15;
+                                h *= 0x846c_a68b;
+                                h ^= h >> 16;
 
-                                    h
+                                h
+                            }
+
+                            let hash = {
+                                #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                                if is_x86_feature_detected!("sse4.2") {
+                                    unsafe {
+                                        std::arch::x86_64::_mm_crc32_u64(
+                                            u64::from(DOMAIN_CONST),
+                                            seed_data,
+                                        ) as u32
+                                    }
+                                } else {
+                                    murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
                                 }
 
-                                let hash = {
-                                    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-                                    if is_x86_feature_detected!("sse4.2") {
-                                        unsafe {
-                                            std::arch::x86_64::_mm_crc32_u64(
-                                                u64::from(DOMAIN_CONST),
-                                                seed_data,
-                                            ) as u32
-                                        }
-                                    } else {
-                                        murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
-                                    }
-
-                                    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-                                    murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
-                                };
-
-                                let bits = (hash & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
-                                let res = f32::from_bits(bits);
-                                unsafe { fsub_fast(res, 1.5) }
+                                #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+                                murmur3_64to32_seeded::<DOMAIN_CONST>(seed_data)
                             };
 
-                            lum = unsafe {
+                            let bits = (hash & 0x007f_ffff) | 0x3f80_0000; // 0x3f80_0000 is 1.0 in f32
+                            let res = f32::from_bits(bits);
+                            unsafe { fsub_fast(res, 1.5) }
+                        };
+
+                        lum = unsafe {
                             fadd_fast(lum, fmul_fast(FloatPrecision::from(random_value), 0.0001))
-                            };
-                        }
-                        let ch = find_nearest_optimized(intensity_lookup, lum)?.1;
-                        let color = maximize(*p);
-                        Some((*ch, color))
-                    };
+                        };
+                    }
+                    let ch = find_nearest_optimized(intensity_lookup, lum)?.1;
+                    let color = maximize(*p);
+                    Some((*ch, color))
+                };
 
                 #[cfg(feature = "truecolor")]
                 let mut last_color: Option<Rgb<_>> = None;
@@ -417,9 +439,7 @@ pub fn image(
                                     write!(
                                         output_buffer,
                                         "{ESCAPE}[38;2;{};{};{}m",
-                                        unsafe { fmul_fast(color[0], 2.0) } as u8,
-                                        unsafe { fmul_fast(color[1], 2.0) } as u8,
-                                        unsafe { fmul_fast(color[2], 2.0) } as u8
+                                        color[0] as u8, color[1] as u8, color[2] as u8
                                     )
                                     .unwrap();
                                     last_color = Some(color);
