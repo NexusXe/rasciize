@@ -18,6 +18,7 @@ struct PlanarBuffer {
     blue: Vec<f32x16>,  // Contiguous Blues
 }
 
+#[allow(dead_code)]
 impl PlanarBuffer {
     #[inline(always)]
     fn new(width: u32, height: u32) -> Self {
