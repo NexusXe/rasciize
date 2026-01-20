@@ -32,7 +32,7 @@ impl PlanarBuffer {
         }
     }
 
-    fn from_rgb8(rgb8: &DynamicImage) -> Self {
+    fn from_dynimage(rgb8: &DynamicImage) -> Self {
         let frame = rgb8.to_rgb8();
         let width = frame.width();
         let height = frame.height();
@@ -108,6 +108,103 @@ impl PlanarBuffer {
                 all_reds.extend_from_slice(&r_batch[..needed]);
                 all_greens.extend_from_slice(&g_batch[..needed]);
                 all_blues.extend_from_slice(&b_batch[..needed]);
+            }
+        }
+
+        Self {
+            width,
+            height,
+            red: all_reds,
+            green: all_greens,
+            blue: all_blues,
+        }
+    }
+
+    #[inline]
+    fn from_rgb32f(frame: &Rgb32FImage) -> Self {
+        const S_IDX_A: usizex16 = {
+            let mut output = [0usize; 16];
+            let mut i: usize = 0;
+            while i < output.len() {
+                output[i] += i * 3;
+                i += 1;
+            }
+            usizex16::from_array(output)
+        };
+
+        const S_IDX_B: usizex16 = {
+            let mut output = [1usize; 16];
+            let mut i: usize = 0;
+            while i < output.len() {
+                output[i] += i * 3;
+                i += 1;
+            }
+            usizex16::from_array(output)
+        };
+
+        const S_IDX_C: usizex16 = {
+            let mut output = [2usize; 16];
+            let mut i: usize = 0;
+            while i < output.len() {
+                output[i] += i * 3;
+                i += 1;
+            }
+            usizex16::from_array(output)
+        };
+
+        let width = frame.width();
+        let height = frame.height();
+        let pixel_count = (width * height) as usize;
+
+        let vec_capacity = pixel_count.div_ceil(16);
+        let mut all_reds: Vec<f32x16> = Vec::with_capacity(vec_capacity);
+        let mut all_greens: Vec<f32x16> = Vec::with_capacity(vec_capacity);
+        let mut all_blues: Vec<f32x16> = Vec::with_capacity(vec_capacity);
+
+        let pixels = frame.as_flat_samples().samples;
+
+        // consume 48 pixels at a time to fill 3 f32x16s
+        let mut chunks = pixels.chunks_exact(48);
+
+        for chunk in &mut chunks {
+            let v0 = f32x16::from_slice(chunk);
+            let v1 = f32x16::from_slice(chunk);
+            let v2 = f32x16::from_slice(chunk);
+
+            let mut buffer = [0f32; 48];
+            v0.copy_to_slice(&mut buffer[0..16]);
+            v1.copy_to_slice(&mut buffer[16..32]);
+            v2.copy_to_slice(&mut buffer[32..48]);
+
+            let reds = f32x16::gather_or_default(&buffer, S_IDX_A);
+            let greens = f32x16::gather_or_default(&buffer, S_IDX_B);
+            let blues = f32x16::gather_or_default(&buffer, S_IDX_C);
+
+            all_reds.push(reds);
+            all_greens.push(greens);
+            all_blues.push(blues);
+        }
+
+        // remainder
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            let mut reds = [0f32; 64];
+            let mut greens = [0f32; 64];
+            let mut blues = [0f32; 64];
+            let mut count = 0;
+            for p in remainder.chunks_exact(3) {
+                reds[count] = p[0];
+                greens[count] = p[1];
+                blues[count] = p[2];
+                count += 1;
+            }
+            if count > 0 {
+                let red = f32x16::from_slice(&reds);
+                let green = f32x16::from_slice(&greens);
+                let blue = f32x16::from_slice(&blues);
+                all_reds.push(red);
+                all_greens.push(green);
+                all_blues.push(blue);
             }
         }
 
@@ -797,25 +894,25 @@ fn lanczos3_vertical(src: &PlanarBuffer, dst_height: u32, filters: &FilterBank) 
 
 #[inline]
 pub fn lanczos3_resize(
-    input: &DynamicImage,
+    input: &Rgb32FImage,
     dst_width: u32,
     dst_height: u32,
     horizontal_filters: &FilterBank,
     vertical_filters: &FilterBank,
-) -> DynamicImage {
+) -> Rgb32FImage {
     // set this again for good measure
     #[allow(deprecated)] // too damn bad
     unsafe {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     }
 
-    let src = PlanarBuffer::from_rgb8(input);
+    let src = PlanarBuffer::from_rgb32f(input);
     let dst = lanczos3_vertical(
         &lanczos3_horizontal(&src, dst_width, horizontal_filters),
         dst_height,
         vertical_filters,
     );
-    DynamicImage::ImageRgb32F(dst.into_rgb32fimage())
+    dst.into_rgb32fimage()
 }
 
 #[cfg(test)]

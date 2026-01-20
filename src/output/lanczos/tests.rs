@@ -356,7 +356,7 @@ fn test_rgb8_to_planarbuffer() {
 
     // Convert
     let dynamic_img = image::DynamicImage::ImageRgb8(img.clone());
-    let pb = PlanarBuffer::from_rgb8(&dynamic_img);
+    let pb = PlanarBuffer::from_dynimage(&dynamic_img);
 
     assert_eq!(pb.width, width);
     assert_eq!(pb.height, height);
@@ -407,7 +407,7 @@ fn test_rgb8_to_planarbuffer_remainder() {
     img.put_pixel(9, 6, image::Rgb([100, 200, 50]));
 
     let dynamic_img = image::DynamicImage::ImageRgb8(img);
-    let pb = PlanarBuffer::from_rgb8(&dynamic_img);
+    let pb = PlanarBuffer::from_dynimage(&dynamic_img);
 
     assert_eq!(pb.red.len(), 5);
 
