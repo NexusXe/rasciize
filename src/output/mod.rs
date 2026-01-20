@@ -1,7 +1,8 @@
 use crate::*;
 use ab_glyph::{Font, FontRef};
-use image::{ImageReader, Rgb};
+use image::{ImageReader, Rgb, Rgb32FImage};
 use std::arch::x86_64::*;
+use std::f32;
 use std::intrinsics::prefetch_read_data;
 use std::io::{self, prelude::*};
 use std::thread::sleep;
@@ -87,15 +88,12 @@ pub fn text(
 }
 
 #[inline]
-fn luminance(r: u8, g: u8, b: u8) -> FloatPrecision {
-    let r = u16::from(r);
-    let g = u16::from(g);
-    let b = u16::from(b);
+fn luminance(r: f32, g: f32, b: f32) -> FloatPrecision {
     // Percieved luminance based on HSP (https://alienryderflex.com/hsp.html)
     // luminance = sqrt( 0.299*R^2 + 0.587*G^2 + 0.114*B^2 )
-    let r2 = FloatPrecision::from(r * r);
-    let g2 = FloatPrecision::from(g * g);
-    let b2 = FloatPrecision::from(b * b);
+    let r2 = FloatPrecision::from(unsafe { fmul_fast(r, r) });
+    let g2 = FloatPrecision::from(unsafe { fmul_fast(g, g) });
+    let b2 = FloatPrecision::from(unsafe { fmul_fast(b, b) });
     let mut sum = unsafe { fmul_fast(r2, 0.299) };
     sum = g2.mul_add(0.587, sum);
     sum = b2.mul_add(0.114, sum);
@@ -116,21 +114,21 @@ fn luminance_u8x64(r: u8x64, g: u8x64, b: u8x64) -> f32x64 {
 }
 
 #[inline]
-fn maximize(color: Rgb<u8>) -> Rgb<u8> {
-    let max_component = FloatPrecision::from(*[color[0], color[1], color[2]].iter().max().unwrap());
+fn maximize(color: Rgb<f32>) -> Rgb<f32> {
+    let max_component = FloatPrecision::from([color[0], color[1], color[2]].iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
     if max_component == 0.0 {
-        return Rgb([0, 0, 0]);
+        return Rgb([0.0, 0.0, 0.0]);
     }
+
     let scale = unsafe { fdiv_fast(255.0, max_component) };
     let maximum_r = unsafe { fmul_fast(FloatPrecision::from(color[0]), scale) };
     let maximum_g = unsafe { fmul_fast(FloatPrecision::from(color[1]), scale) };
     let maximum_b = unsafe { fmul_fast(FloatPrecision::from(color[2]), scale) };
-    //Rgb([maximum_r as u8, maximum_g as u8, maximum_b as u8])
     let half_r = unsafe { fdiv_fast(fadd_fast(maximum_r, FloatPrecision::from(color[0])), 2.0) };
     let half_g = unsafe { fdiv_fast(fadd_fast(maximum_g, FloatPrecision::from(color[1])), 2.0) };
     let half_b = unsafe { fdiv_fast(fadd_fast(maximum_b, FloatPrecision::from(color[2])), 2.0) };
 
-    Rgb([half_r as u8, half_g as u8, half_b as u8])
+    Rgb([half_r, half_g, half_b])
 }
 
 // too many lines? too bad!
@@ -165,7 +163,7 @@ pub fn image(
         _start_time = std::time::Instant::now();
     }
 
-    let mut frames = Vec::new();
+    let mut frames: Vec<Rgb32FImage> = Vec::new();
     if input.format() == Some(image::ImageFormat::Gif) {
         // crazy shuffling between DynamicImage is fine because it's done once
         let gif_decoder = image::codecs::gif::GifDecoder::new(input.into_inner())?;
@@ -184,13 +182,11 @@ pub fn image(
                 eprint!("{ESCAPE}[A"); // move up 1 line for progress output
             }
 
-            frames.push(DynamicImage::ImageRgb8(
-                DynamicImage::ImageRgba8(frame?.into_buffer()).to_rgb8(),
-            ));
+            frames.push(DynamicImage::ImageRgba8(frame?.into_buffer()).to_rgb32f());
         }
         frames.shrink_to_fit();
     } else {
-        frames.push(input.decode()?);
+        frames.push(input.decode()?.to_rgb32f());
         #[cfg(feature = "progress")]
         {
             eprintln!("Decoded 1 frame");
@@ -274,9 +270,9 @@ pub fn image(
                     );
                     eprint!("{ESCAPE}[A"); // move up 1 line for progress output
                 }
-                let img = this_frame.to_rgb8();
+                let img = this_frame;
                 let prev_img = if frame_number > 0 {
-                    Some(frames_ref[frame_number - 1].to_rgb8())
+                    Some(&frames_ref[frame_number - 1])
                 } else {
                     None
                 };
@@ -293,10 +289,11 @@ pub fn image(
                 }
 
                 let get_pixel_info =
-                    |x: u32, y: u32, p: &Rgb<u8>, f_num: usize| -> (char, Rgb<u8>) {
+                    |x: u32, y: u32, p: &Rgb<f32>, f_num: usize| -> (char, Rgb<f32>) {
                         let sc_r = p[0];
                         let sc_g = p[1];
                         let sc_b = p[2];
+                        dbg!(&sc_r, &sc_g, &sc_b);
                         let lum = luminance(sc_r, sc_g, sc_b);
                         let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
 
@@ -305,9 +302,9 @@ pub fn image(
                             let seed_data: u64 = u64::from(x)
                                 ^ u64::from(y).rotate_left(16)
                                 ^ (f_num as u64).rotate_left(32)
-                                ^ u64::from(sc_r)
-                                ^ u64::from(sc_g).rotate_left(8)
-                                ^ u64::from(sc_b).rotate_left(24)
+                                ^ u64::from(sc_r.to_bits())
+                                ^ u64::from(sc_g.to_bits()).rotate_left(8)
+                                ^ u64::from(sc_b.to_bits()).rotate_left(24)
                                 ^ u64::from(lum.to_bits()).rotate_left(48); // a little bit of nonlinearity from the sqrt function in luminance()
 
                             let random_value: f32 = {
@@ -366,7 +363,7 @@ pub fn image(
                     };
 
                 #[cfg(feature = "truecolor")]
-                let mut last_color: Option<Rgb<u8>> = None;
+                let mut last_color: Option<Rgb<_>> = None;
 
                 #[cfg(all(not(feature = "truecolor"), feature = "color"))]
                 let mut last_ansi_color: Option<u8> = None;
@@ -378,7 +375,7 @@ pub fn image(
                         let (ch, color) = get_pixel_info(x, y, pixel, frame_number);
 
                         let mut is_redundant = false;
-                        if let Some(ref p_img) = prev_img {
+                        if let Some(p_img) = prev_img {
                             let prev_pixel = p_img.get_pixel(x, y);
                             let (prev_ch, prev_color) =
                                 get_pixel_info(x, y, prev_pixel, frame_number - 1);
@@ -428,7 +425,7 @@ pub fn image(
                                     write!(
                                         output_buffer,
                                         "{ESCAPE}[38;2;{};{};{}m",
-                                        color[0], color[1], color[2]
+                                        color[0] as u8, color[1] as u8, color[2] as u8
                                     )
                                     .unwrap();
                                     last_color = Some(color);
