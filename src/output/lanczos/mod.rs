@@ -168,9 +168,9 @@ impl PlanarBuffer {
         let mut chunks = pixels.chunks_exact(48);
 
         for chunk in &mut chunks {
-            let v0 = f32x16::from_slice(chunk);
-            let v1 = f32x16::from_slice(chunk);
-            let v2 = f32x16::from_slice(chunk);
+            let v0 = f32x16::from_slice(&chunk[0..]);
+            let v1 = f32x16::from_slice(&chunk[16..]);
+            let v2 = f32x16::from_slice(&chunk[32..]);
 
             let mut buffer = [0f32; 48];
             v0.copy_to_slice(&mut buffer[0..16]);
