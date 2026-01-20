@@ -425,7 +425,9 @@ pub fn image(
                                     write!(
                                         output_buffer,
                                         "{ESCAPE}[38;2;{};{};{}m",
-                                        color[0] as u8, color[1] as u8, color[2] as u8
+                                        unsafe { fmul_fast(color[0], 2.0) } as u8,
+                                        unsafe { fmul_fast(color[1], 2.0) } as u8,
+                                        unsafe { fmul_fast(color[2], 2.0) } as u8
                                     )
                                     .unwrap();
                                     last_color = Some(color);
