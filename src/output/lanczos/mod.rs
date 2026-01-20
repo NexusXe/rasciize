@@ -112,6 +112,10 @@ impl PlanarBuffer {
             }
         }
 
+        all_reds.shrink_to_fit();
+        all_greens.shrink_to_fit();
+        all_blues.shrink_to_fit();
+
         Self {
             width,
             height,
@@ -211,6 +215,10 @@ impl PlanarBuffer {
                 all_blues.push(blue);
             }
         }
+
+        all_reds.shrink_to_fit();
+        all_greens.shrink_to_fit();
+        all_blues.shrink_to_fit();
 
         Self {
             width,
