@@ -153,6 +153,8 @@ impl PlanarBuffer {
             usizex16::from_array(output)
         };
 
+        const SCALE: f32x16 = f32x16::splat(255.0);
+
         let width = frame.width();
         let height = frame.height();
         let pixel_count = (width * height) as usize;
@@ -177,9 +179,9 @@ impl PlanarBuffer {
             v1.copy_to_slice(&mut buffer[16..32]);
             v2.copy_to_slice(&mut buffer[32..48]);
 
-            let reds = f32x16::gather_or_default(&buffer, S_IDX_A);
-            let greens = f32x16::gather_or_default(&buffer, S_IDX_B);
-            let blues = f32x16::gather_or_default(&buffer, S_IDX_C);
+            let reds = f32x16::gather_or_default(&buffer, S_IDX_A) * SCALE;
+            let greens = f32x16::gather_or_default(&buffer, S_IDX_B) * SCALE;
+            let blues = f32x16::gather_or_default(&buffer, S_IDX_C) * SCALE;
 
             all_reds.push(reds);
             all_greens.push(greens);
@@ -200,9 +202,9 @@ impl PlanarBuffer {
                 count += 1;
             }
             if count > 0 {
-                let red = f32x16::from_slice(&reds);
-                let green = f32x16::from_slice(&greens);
-                let blue = f32x16::from_slice(&blues);
+                let red = f32x16::from_slice(&reds) * SCALE;
+                let green = f32x16::from_slice(&greens) * SCALE;
+                let blue = f32x16::from_slice(&blues) * SCALE;
                 all_reds.push(red);
                 all_greens.push(green);
                 all_blues.push(blue);
@@ -895,27 +897,26 @@ fn lanczos3_vertical(src: &PlanarBuffer, dst_height: u32, filters: &FilterBank) 
 
 #[inline]
 pub fn lanczos3_resize(
-    input: &DynamicImage,
+    input: &Rgb32FImage,
     dst_width: u32,
     dst_height: u32,
     horizontal_filters: &FilterBank,
     vertical_filters: &FilterBank,
-) -> DynamicImage {
+) -> Rgb32FImage {
     // set this again for good measure
     #[allow(deprecated)] // too damn bad
     unsafe {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     }
 
-    let src = PlanarBuffer::from_dynimage(input);
+    let src = PlanarBuffer::from_rgb32f(input);
     let dst = lanczos3_vertical(
         &lanczos3_horizontal(&src, dst_width, horizontal_filters),
         dst_height,
         vertical_filters,
     );
-    DynamicImage::ImageRgb32F(dst.into_rgb32fimage())
+    dst.into_rgb32fimage()
 }
-
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests;

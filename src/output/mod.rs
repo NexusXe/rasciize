@@ -290,10 +290,10 @@ pub fn image(
 
                 let get_pixel_info =
                     |x: u32, y: u32, p: &Rgb<f32>, f_num: usize| -> (char, Rgb<f32>) {
-                        let sc_r = p[0];
-                        let sc_g = p[1];
-                        let sc_b = p[2];
-                        dbg!(&sc_r, &sc_g, &sc_b);
+                        let sc_r = unsafe{fmul_fast(p[0], 255.0)};
+                        let sc_g = unsafe{fmul_fast(p[1], 255.0)};
+                        let sc_b = unsafe{fmul_fast(p[2], 255.0)};
+                        //dbg!(&sc_r, &sc_g, &sc_b);
                         let lum = luminance(sc_r, sc_g, sc_b);
                         let mut lum_scaled = unsafe { fdiv_fast(lum, 255.0) };
 
