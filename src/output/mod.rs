@@ -368,7 +368,7 @@ pub fn image(
                         };
 
                         lum = unsafe {
-                            fadd_fast(lum, fmul_fast(FloatPrecision::from(random_value), 0.0001))
+                            fadd_fast(lum, fmul_fast(FloatPrecision::from(random_value), 0.001))
                         };
                     }
                     let ch = find_nearest_optimized(intensity_lookup, lum)?.1;
