@@ -379,41 +379,52 @@ fn sinc(x: f32) -> f32 {
 #[inline(always)]
 #[allow(clippy::unreadable_literal)]
 pub fn sinc_approx(x: f32) -> f32 {
-    const C0: f32 = 0.999996;
-    const C1: f32 = -1.6448622;
-    const C2: f32 = 0.8114296;
-    const C3: f32 = -0.19018897;
-    const C4: f32 = 0.025642106;
-    const C5: f32 = -0.0021039767;
-    const C6: f32 = 8.781045e-05;
+    // Coefficients generated for f(y) = sinc(sqrt(y)) where y = x^2.
+    // Derived via Chebyshev node fitting over [0, 25].
+    // C0..C10 correspond to the constant term up to the x^20 term.
+    const C0: f32 = 0.99999994;
+    const C1: f32 = -1.6449327;
+    const C2: f32 = 0.8117368;
+    const C3: f32 = -0.19074294;
+    const C4: f32 = 0.026140561;
+    const C5: f32 = -0.0023425776;
+    const C6: f32 = 0.00014737088;
+    const C7: f32 = -6.7683204e-06;
+    const C8: f32 = 2.264378e-07;
+    const C9: f32 = -5.090697e-09;
+    const C10: f32 = 5.8084558e-11;
 
     if x == 0.0 || x.is_subnormal() {
         1.0
     } else {
         unsafe {
-            use std::intrinsics::{fadd_fast, fmul_fast};
+            // Precompute powers of x^2 needed for the tree evaluation.
+            let x2 = fmul_fast(x, x);
+            let x4 = fmul_fast(x2, x2);
+            let x8 = fmul_fast(x4, x4);
+            let x16 = fmul_fast(x8, x8);
 
-            // 1. Pre-calculate powers of u (u = x^2)
-            let u = fmul_fast(x, x);
-            let u2 = fmul_fast(u, u);
-            let u4 = fmul_fast(u2, u2);
+            let term01 = C1.mul_add(x2, C0);
+            let term23 = C3.mul_add(x2, C2);
+            let term45 = C5.mul_add(x2, C4);
+            let term67 = C7.mul_add(x2, C6);
+            let term89 = C9.mul_add(x2, C8);
 
-            // 2. Layer 1: Independent pairs (C_n + C_{n+1}*u)
-            // Equivalent to: C1 * u + C0
-            let pair_0_1 = fadd_fast(fmul_fast(C1, u), C0);
-            let pair_2_3 = fadd_fast(fmul_fast(C3, u), C2);
-            let pair_4_5 = fadd_fast(fmul_fast(C5, u), C4);
+            // Layer 2: Combine pairs using x^4
+            // Structure: High_Pair * x^4 + Low_Pair
+            let term0123 = term23.mul_add(x4, term01);
+            let term4567 = term67.mul_add(x4, term45);
 
-            // 3. Layer 2: Combine pairs using u^2
-            // Equivalent to: pair_0_1 + pair_2_3 * u^2
-            let quad_0_3 = fadd_fast(pair_0_1, fmul_fast(pair_2_3, u2));
+            // The C10 term needs to be combined with term89.
+            // term89 is (C8 + C9*y). We want (C8 + C9*y) + C10*y^2.
+            // y^2 is x^4.
+            let term8910 = C10.mul_add(x4, term89);
 
-            // Equivalent to: pair_4_5 + C6 * u^2
-            let quad_4_6 = fadd_fast(pair_4_5, fmul_fast(C6, u2));
+            // Layer 3: Combine quads using x^8
+            let term0_7 = term4567.mul_add(x8, term0123);
 
-            // 4. Layer 3: Final Combination using u^4
-            // Equivalent to: quad_0_3 + quad_4_6 * u^4
-            fadd_fast(quad_0_3, fmul_fast(quad_4_6, u4))
+            // Layer 4: Final combination using x^16 (x^8 * x^8)
+            term8910.mul_add(x16, term0_7)
         }
     }
 }
