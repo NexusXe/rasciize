@@ -421,6 +421,126 @@ fn test_rgb8_to_planarbuffer_remainder() {
     assert_eq!(b_floats[69], 50.0);
 }
 
+#[test]
+fn test_from_rgb32f_basic() {
+    if !is_x86_feature_detected!("avx512f") {
+        return;
+    }
+
+    let width = 4u32;
+    let height = 4u32;
+    let mut img = Rgb32FImage::new(width, height);
+
+    // Fill with pattern
+    // (x, y) = R: x, G: y, B: x+y
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        *p = Rgb([(x as f32), (y as f32), ((x + y) as f32)]);
+    }
+
+    let pb = PlanarBuffer::from_rgb32f(&img);
+
+    assert_eq!(pb.width, width);
+    assert_eq!(pb.height, height);
+    assert_eq!(pb.red.len(), 1); // 16 floats
+
+    // helpers
+    let r_floats = as_f32(&pb.red);
+    let g_floats = as_f32(&pb.green);
+    let b_floats = as_f32(&pb.blue);
+
+    // Check values
+    let mut idx = 0;
+    for y in 0..height {
+        for x in 0..width {
+            let expect_r = x as f32;
+            let expect_g = y as f32;
+            let expect_b = (x + y) as f32;
+
+            assert_eq!(r_floats[idx], expect_r, "Red at {x},{y}");
+            assert_eq!(g_floats[idx], expect_g, "Green at {x},{y}");
+            assert_eq!(b_floats[idx], expect_b, "Blue at {x},{y}");
+            idx += 1;
+        }
+    }
+}
+
+#[test]
+fn test_rgb32f_vs_dynimage_consistency() {
+    if !is_x86_feature_detected!("avx512f") {
+        return;
+    }
+
+    let width = 8u32;
+    let height = 8u32;
+
+    // 1. Create Source Data (u8)
+    let mut img_u8 = image::RgbImage::new(width, height);
+    for (x, y, p) in img_u8.enumerate_pixels_mut() {
+        *p = image::Rgb([x as u8 * 10, y as u8 * 10, (x + y) as u8 * 10]);
+    }
+
+    // 2. Create Equivalent f32 Image (0.0 - 255.0 range)
+    let mut img_f32 = Rgb32FImage::new(width, height);
+    for (x, y, p) in img_f32.enumerate_pixels_mut() {
+        let p_u8 = img_u8.get_pixel(x, y);
+        *p = Rgb([f32::from(p_u8[0]), f32::from(p_u8[1]), f32::from(p_u8[2])]);
+    }
+
+    // 3. Convert both
+    let pb_from_u8 = PlanarBuffer::from_dynimage(&DynamicImage::ImageRgb8(img_u8));
+    let pb_from_f32 = PlanarBuffer::from_rgb32f(&img_f32); // Using our new function
+
+    // 4. Compare
+    let r_u8 = as_f32(&pb_from_u8.red);
+    let g_u8 = as_f32(&pb_from_u8.green);
+    let b_u8 = as_f32(&pb_from_u8.blue);
+
+    let r_f32 = as_f32(&pb_from_f32.red);
+    let g_f32 = as_f32(&pb_from_f32.green);
+    let b_f32 = as_f32(&pb_from_f32.blue);
+
+    assert_eq!(r_u8.len(), r_f32.len());
+
+    // We expect exact matches because valid u8 integers representable exactly in f32
+    assert_eq!(r_u8, r_f32, "Red channel mismatch");
+    assert_eq!(g_u8, g_f32, "Green channel mismatch");
+    assert_eq!(b_u8, b_f32, "Blue channel mismatch");
+}
+
+#[test]
+fn test_from_rgb32f_remainder() {
+    if !is_x86_feature_detected!("avx512f") {
+        return;
+    }
+
+    // Similar to test_rgb8_to_planarbuffer_remainder but for f32
+    // Use 70 pixels (48 + 22).
+    // chunk size for f32 path is 48 pixels (3 vectors of 16).
+    // 70 = 48 (1 chunk) + 22 (remainder).
+
+    let width = 10;
+    let height = 7; // 70 pixels
+    let mut img = Rgb32FImage::new(width, height);
+
+    // Set last pixel at index 69
+    img.put_pixel(9, 6, Rgb([100.5, 200.5, 50.5]));
+
+    let pb = PlanarBuffer::from_rgb32f(&img);
+
+    // Capacity check
+    // 70 pixels / 16 = ceil(4.375) = 5 vectors needed per channel
+    assert_eq!(pb.red.len(), 5);
+
+    let r_floats = as_f32(&pb.red);
+    let g_floats = as_f32(&pb.green);
+    let b_floats = as_f32(&pb.blue);
+
+    // Index 69 (last pixel)
+    assert_eq!(r_floats[69], 100.5);
+    assert_eq!(g_floats[69], 200.5);
+    assert_eq!(b_floats[69], 50.5);
+}
+
 // #[test]
 // fn test_to_rgb8_basic() {
 //     if !is_x86_feature_detected!("avx512f") {

@@ -121,7 +121,8 @@ impl PlanarBuffer {
     }
 
     #[inline]
-    fn from_rgb32f(frame: &Rgb32FImage) -> Self {
+    #[allow(unused)]
+    pub fn from_rgb32f(frame: &Rgb32FImage) -> Self {
         const S_IDX_A: usizex16 = {
             let mut output = [0usize; 16];
             let mut i: usize = 0;
@@ -167,9 +168,9 @@ impl PlanarBuffer {
         let mut chunks = pixels.chunks_exact(48);
 
         for chunk in &mut chunks {
-            let v0 = f32x16::from_slice(chunk);
-            let v1 = f32x16::from_slice(chunk);
-            let v2 = f32x16::from_slice(chunk);
+            let v0 = f32x16::from_slice(&chunk[0..]);
+            let v1 = f32x16::from_slice(&chunk[16..]);
+            let v2 = f32x16::from_slice(&chunk[32..]);
 
             let mut buffer = [0f32; 48];
             v0.copy_to_slice(&mut buffer[0..16]);
@@ -894,25 +895,25 @@ fn lanczos3_vertical(src: &PlanarBuffer, dst_height: u32, filters: &FilterBank) 
 
 #[inline]
 pub fn lanczos3_resize(
-    input: &Rgb32FImage,
+    input: &DynamicImage,
     dst_width: u32,
     dst_height: u32,
     horizontal_filters: &FilterBank,
     vertical_filters: &FilterBank,
-) -> Rgb32FImage {
+) -> DynamicImage {
     // set this again for good measure
     #[allow(deprecated)] // too damn bad
     unsafe {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     }
 
-    let src = PlanarBuffer::from_rgb32f(input);
+    let src = PlanarBuffer::from_dynimage(input);
     let dst = lanczos3_vertical(
         &lanczos3_horizontal(&src, dst_width, horizontal_filters),
         dst_height,
         vertical_filters,
     );
-    dst.into_rgb32fimage()
+    DynamicImage::ImageRgb32F(dst.into_rgb32fimage())
 }
 
 #[cfg(test)]
